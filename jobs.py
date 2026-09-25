@@ -459,10 +459,14 @@ FACTS = [  # (label pattern, profile key); first match wins
     (r"where are you (currently )?(located|based)|current (location|city)|^location|city", "location"),
     (r"^country", "country"),
     (r"hear about|how did you (find|learn)|referr", "heard_about"),
-    (r"start date|earliest.*start|when (can|could) you start|available to start|notice period", "start_date"),
+    # "Start date year" belongs to an education entry, not to when Sai can start
+    (r"start date(?! (year|month))|earliest.*start|when (can|could) you start|available to start|notice period", "start_date"),
     (r"salary|compensation|pay expectation", "salary"),
     (r"graduat", "graduation"),
-    (r"degree|education|university|school|college", "education"),
+    (r"^degree|degree (type|level)|highest degree", "degree"),
+    (r"discipline|major|field of study", "discipline"),
+    (r"school|university|college", "school"),
+    (r"education", "education"),
 ]
 FALLBACK = {"preferred_name": "first_name"}  # used when the first key is empty
 EEO_RE = re.compile(r"gender|race|ethnic|hispanic|latino|veteran|disabilit|sexual orientation|transgender", re.I)
@@ -776,9 +780,15 @@ def detail(job_id):
 
 
 def apply_url(job):
-    """The page with the application form."""
-    ats = job["id"].split(":", 1)[0]
+    """The page with the application form, on the job board's own site where the
+    autofill script runs. Many Greenhouse postings link to the company's careers page,
+    and job-boards.greenhouse.io/<board>/jobs/<id> redirects there too, but the
+    embeddable form opens as a page of its own."""
+    ats, board, native = job["id"].split(":", 2)
     url = job.get("url", "")
+    if ats == "greenhouse":
+        q = urllib.parse.urlencode({"for": urllib.parse.unquote(board), "token": native})
+        return f"https://job-boards.greenhouse.io/embed/job_app?{q}"
     if ats == "lever" and not url.endswith("/apply"):
         return url.rstrip("/") + "/apply"
     if ats == "ashby" and not url.endswith("/application"):

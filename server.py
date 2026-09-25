@@ -912,12 +912,13 @@ FILL_SCRIPT = r"""// ==UserScript==
     return i;
   }
 
-  // Option index for a dropdown answer. Place searches also accept the first word:
-  // "Albany, NY" takes "Albany, New York, United States".
-  function pickLoose(labels, value) {
+  // Option index for a dropdown answer. Location searches also accept the first word
+  // ("Albany, NY" takes "Albany, New York, United States"); other dropdowns, like
+  // schools, need a real match or are left for Sai.
+  function pickLoose(labels, value, loose) {
     let i = pick(labels, value);
     const first = norm(value).split(" ")[0];
-    if (i < 0) i = labels.findIndex(l => first && norm(l).startsWith(first));
+    if (i < 0 && loose) i = labels.findIndex(l => first && norm(l).startsWith(first));
     return i;
   }
 
@@ -937,6 +938,7 @@ FILL_SCRIPT = r"""// ==UserScript==
     };
     document.addEventListener("agent-fill-combo", async e => {
       const el = e.target, value = el.getAttribute("data-agent-fill") || "";
+      const loose = el.getAttribute("data-agent-loose") === "1";
       let inst = comp(el);
       if (!inst) return el.setAttribute("data-agent-fill-result", "none");
       if (inst.props.onInputChange) inst.props.onInputChange(value.split(",")[0], {action: "input-change", prevInputValue: ""});
@@ -948,7 +950,7 @@ FILL_SCRIPT = r"""// ==UserScript==
         const labels = opts.map(o => norm(String((inst.props.getOptionLabel ? inst.props.getOptionLabel(o) : o.label) || "")));
         let i = labels.findIndex(l => l === v);
         if (i < 0) i = labels.findIndex(l => l && (v.startsWith(l + " ") || l.startsWith(v + " ")));
-        if (i < 0) i = labels.findIndex(l => first && l.startsWith(first));
+        if (i < 0 && loose) i = labels.findIndex(l => first && l.startsWith(first));
         if (i >= 0) { inst.selectOption(opts[i]); return el.setAttribute("data-agent-fill-result", "ok"); }
       }
       el.setAttribute("data-agent-fill-result", "no");
@@ -963,11 +965,12 @@ FILL_SCRIPT = r"""// ==UserScript==
     s.remove();
   }
 
-  async function fillCombo(el, value) {
+  async function fillCombo(el, value, loose) {
     injectHelper();
     if (document.documentElement.hasAttribute("data-agent-helper")) {
       el.removeAttribute("data-agent-fill-result");
       el.setAttribute("data-agent-fill", value);
+      el.setAttribute("data-agent-loose", loose ? "1" : "0");
       el.dispatchEvent(new CustomEvent("agent-fill-combo", {bubbles: true}));
       for (let t = 0; t < 20; t++) {
         await sleep(250);
@@ -984,7 +987,7 @@ FILL_SCRIPT = r"""// ==UserScript==
       // only this box's own list: the page can have others, like the phone country list
       const list = document.getElementById(el.getAttribute("aria-controls") || el.getAttribute("aria-owns") || "");
       const opts = list ? [...list.querySelectorAll("[role=option]")] : [];
-      const i = pickLoose(opts.map(o => o.innerText), value);
+      const i = pickLoose(opts.map(o => o.innerText), value, loose);
       if (i >= 0) {
         for (const ev of ["mousedown", "mouseup", "click"]) opts[i].dispatchEvent(new MouseEvent(ev, {bubbles: true}));
         return true;
@@ -997,7 +1000,7 @@ FILL_SCRIPT = r"""// ==UserScript==
   async function put(el, f, v) {
     if (f.type === "radio") { const i = pick(f.options, v); if (i < 0) return false; el[i].click(); return true; }
     if (f.type === "select") { const i = pick(f.options, v); if (i < 0) return false; setValue(el, el.options[i].value); return true; }
-    if (f.type === "combobox") return fillCombo(el, v);
+    if (f.type === "combobox") return fillCombo(el, v, /location|city/i.test(f.label));
     if (!el.value || !el.value.trim()) setValue(el, v);  // never overwrite what's there
     return true;
   }
