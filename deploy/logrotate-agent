@@ -1,0 +1,9 @@
+/home/agentd/actions.jsonl {
+    weekly
+    rotate 12
+    compress
+    missingok
+    notifempty
+    copytruncate
+    su agentd agentd
+}

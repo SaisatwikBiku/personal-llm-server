@@ -1,0 +1,12 @@
+[Unit]
+Description=Block the agent user from the control panel port
+Before=agent-web.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/sbin/iptables -I OUTPUT -o lo -p tcp --dport 8000 -m owner --uid-owner agent -j REJECT
+ExecStop=/usr/sbin/iptables -D OUTPUT -o lo -p tcp --dport 8000 -m owner --uid-owner agent -j REJECT
+
+[Install]
+WantedBy=multi-user.target

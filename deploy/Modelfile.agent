@@ -1,0 +1,2 @@
+FROM hf.co/unsloth/Qwen3-4B-Instruct-2507-GGUF:Q4_K_M
+PARAMETER num_thread 8

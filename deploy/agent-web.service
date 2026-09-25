@@ -1,0 +1,17 @@
+[Unit]
+Description=Local agent web control panel
+After=network-online.target ollama.service agent-firewall.service
+Wants=ollama.service agent-firewall.service
+
+[Service]
+User=agentd
+WorkingDirectory=/opt/agent
+Environment="AGENT_USE_TOOLRUNNER=1"
+Environment="AGENT_LOG=/home/agentd/actions.jsonl"
+Environment="AGENT_VAPID_KEY=/home/agentd/vapid_private.pem"
+Environment="AGENT_PUSH_SUBS=/home/agentd/push_subscriptions.json"
+ExecStart=/opt/agent/venv/bin/uvicorn server:app --host 127.0.0.1 --port 8000
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
