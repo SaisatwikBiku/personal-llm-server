@@ -10,6 +10,7 @@ import json
 import os
 import subprocess
 import threading
+import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -22,6 +23,7 @@ from pydantic import BaseModel
 from pywebpush import WebPushException, webpush
 
 import agent as core
+import jobs
 
 ALLOWED_LOGIN = os.environ.get("AGENT_ALLOWED_LOGIN", "").strip()
 MAX_EVENTS = 300
@@ -226,6 +228,30 @@ def run_task(task):
         set_status("idle")
 
 
+# ---------- job search ----------
+
+def panel_busy():
+    return state["status"] != "idle"
+
+
+def jobs_loop():
+    """Run the nightly job search and the morning digest when they're due (see jobs.tick)."""
+    last_error = ""
+    while True:
+        try:
+            jobs.tick(notify, panel_busy)
+            last_error = ""
+        except Exception as e:  # keep the loop alive; report each new error once
+            if str(e) != last_error:
+                last_error = str(e)
+                print(f"job search error: {e}", flush=True)
+                notify("Job search error", str(e), tag="jobs")
+        time.sleep(60)
+
+
+threading.Thread(target=jobs_loop, daemon=True).start()
+
+
 # ---------- HTTP ----------
 
 def check_user(request: Request):
@@ -297,6 +323,56 @@ def stop(request: Request):
     return {"ok": True}
 
 
+class JobIn(BaseModel):
+    id: str
+    status: str = ""
+
+
+@app.get("/api/jobs")
+def jobs_summary(request: Request):
+    check_user(request)
+    return jobs.summary()
+
+
+@app.get("/api/jobs/detail")
+def jobs_detail(id: str, request: Request):
+    check_user(request)
+    job = jobs.detail(id)
+    if not job:
+        raise HTTPException(404, "No such job")
+    return job
+
+
+@app.post("/api/jobs/status")
+def jobs_status(body: JobIn, request: Request):
+    check_user(request)
+    if body.status not in ("new", "applied", "skipped"):
+        raise HTTPException(400, "Status must be new, applied or skipped")
+    if not jobs.set_status(body.id, body.status):
+        raise HTTPException(404, "No such job")
+    return {"ok": True}
+
+
+@app.post("/api/jobs/run")
+def jobs_run(request: Request):
+    check_user(request)
+    if not jobs.configured():
+        raise HTTPException(409, "Job search isn't set up yet")
+    if jobs.progress["running"]:
+        raise HTTPException(409, "A job search is already running")
+    threading.Thread(target=jobs.run, args=(panel_busy,), daemon=True).start()
+    return {"ok": True}
+
+
+@app.post("/api/jobs/prepare")
+def jobs_prepare(body: JobIn, request: Request):
+    check_user(request)
+    if not jobs.detail(body.id):
+        raise HTTPException(404, "No such job")
+    threading.Thread(target=jobs.prepare_now, args=(body.id, panel_busy), daemon=True).start()
+    return {"ok": True}
+
+
 class SubscriptionIn(BaseModel):
     endpoint: str
     keys: dict
@@ -365,14 +441,17 @@ self.addEventListener("push", event => {
   let d = {};
   try { d = event.data.json(); } catch (e) { d = {title: "Agent", body: event.data ? event.data.text() : ""}; }
   event.waitUntil(self.registration.showNotification(d.title || "Agent", {
-    body: d.body || "", tag: d.tag || "agent", data: {url: "/"}
+    body: d.body || "", tag: d.tag || "agent", data: {url: d.tag === "jobs" ? "/#jobs" : "/"}
   }));
 });
 self.addEventListener("notificationclick", event => {
   event.notification.close();
+  const url = (event.notification.data && event.notification.data.url) || "/";
   event.waitUntil(clients.matchAll({type: "window", includeUncontrolled: true}).then(list => {
-    for (const c of list) { if ("focus" in c) return c.focus(); }
-    return clients.openWindow("/");
+    for (const c of list) {
+      if ("focus" in c) { if (url !== "/") c.postMessage({view: "jobs"}); return c.focus(); }
+    }
+    return clients.openWindow(url);
   }));
 });
 """
@@ -413,13 +492,40 @@ button{font:inherit;border:0;border-radius:8px;padding:11px 14px;cursor:pointer}
 footer{display:flex;gap:8px;padding:10px 14px calc(10px + env(safe-area-inset-bottom,0px));border-top:1px solid var(--line)}
 input{font:inherit;font-size:16px;color:var(--fg);background:var(--card);border:1px solid var(--line);border-radius:8px;padding:10px;width:100%}
 #send{background:var(--accent);color:#fff}
+#jobs{display:none;flex:1;overflow-y:auto;padding:12px 14px;-webkit-overflow-scrolling:touch}
+.jbar{display:flex;gap:8px;align-items:center;margin-bottom:10px}
+.jbar select{font:inherit;font-size:13px;color:var(--fg);background:var(--card);border:1px solid var(--line);border-radius:8px;padding:5px 6px}
+#jmeta{font-size:13px;color:var(--muted);margin-bottom:10px}
+.job{margin-bottom:10px;cursor:pointer}
+.jtop{display:flex;gap:8px;align-items:baseline}
+.score{font-size:12px;font-weight:600;border-radius:6px;padding:1px 6px;background:var(--code);color:var(--muted);flex:none}
+.score.strong{background:var(--accent);color:#fff}
+.score.good{border:1px solid var(--accent);color:var(--accent)}
+.flags{display:flex;flex-wrap:wrap;gap:6px;margin:4px 0}
+.flag{font-size:12px;border:1px solid var(--line);border-radius:6px;padding:0 6px;color:var(--muted)}
+.flag.no{border-color:var(--deny);color:var(--deny)}
+.flag.yes{border-color:var(--accent);color:var(--accent)}
+.jbody{cursor:auto}
+.jbody:not(:empty){margin-top:10px;border-top:1px solid var(--line);padding-top:10px}
+.ans{margin:0 0 10px}
+.q{font-size:13px;font-weight:600}
+.ans .ghost{margin-top:4px}
+.applylink{display:inline-block;background:var(--accent);color:#fff;text-decoration:none;border-radius:8px;padding:9px 14px;margin-bottom:10px}
 </style></head><body>
 <header>
   <strong>Agent</strong>
   <span id="status">connecting</span>
-  <span><button class="ghost" id="alerts" style="display:none">Alerts</button> <button class="ghost" id="clear">Clear</button> <button class="ghost" id="stop">Stop</button></span>
+  <span><button class="ghost" id="jobsbtn">Jobs</button> <button class="ghost" id="alerts" style="display:none">Alerts</button> <button class="ghost" id="clear">Clear</button> <button class="ghost" id="stop">Stop</button></span>
 </header>
 <div id="log"></div>
+<div id="jobs">
+  <div class="jbar">
+    <select id="jfilter"><option value="new">New</option><option value="applied">Applied</option><option value="skipped">Skipped</option><option value="all">All</option></select>
+    <button class="ghost" id="jrun">Run now</button>
+  </div>
+  <div id="jmeta"></div>
+  <div id="jlist"></div>
+</div>
 <div id="pending">
   <strong>Approve this action?</strong>
   <div id="pbody"></div>
@@ -514,6 +620,111 @@ async function setupAlerts(){
     } catch (e) { alert("Could not turn on alerts: " + e); }
   };
 }
+const KIND = {fact: "from profile.json", draft: "draft by the local model, check every claim",
+  legal: "read and answer yourself", you: "needs you", file: "attach", eeo: "voluntary"};
+let view = "log", jobsSig = "", openJob = null, openBody = null;
+function showView(v){
+  view = v;
+  $("log").style.display = v === "log" ? "" : "none";
+  $("jobs").style.display = v === "jobs" ? "block" : "none";
+  $("jobsbtn").textContent = v === "jobs" ? "Log" : "Jobs";
+  history.replaceState(null, "", v === "jobs" ? "#jobs" : location.pathname);
+  if (v === "jobs") { jobsSig = ""; loadJobs(); }
+}
+function jobsMeta(s){
+  const p = s.progress, lr = s.last_run;
+  if (p.running) return "Running: " + p.step + (p.total ? " (" + p.done + "/" + p.total + ")" : "");
+  if (!lr) return "Not run yet.";
+  const when = new Date(lr.finished || lr.started).toLocaleString([], {dateStyle: "medium", timeStyle: "short"});
+  const n = x => (x || 0).toLocaleString();
+  let t = "Last run " + when + ": " + n(lr.boards) + " companies, " + n(lr.new) + " new postings, " + n(lr.matched) + " passed the filters, " + n(lr.scored) + " scored";
+  if (lr.backlog) t += ", " + n(lr.backlog) + " left for the next run";
+  return t + ". " + s.discovered + " companies found through search.";
+}
+async function loadJobs(){
+  let s;
+  try { const r = await fetch("api/jobs"); if (!r.ok) return; s = await r.json(); } catch (e) { return; }
+  $("jmeta").textContent = jobsMeta(s);
+  $("jrun").disabled = s.progress.running || !s.configured;
+  const f = $("jfilter").value;
+  const list = s.jobs.filter(j => f === "all" || j.status === f);
+  const sig = f + JSON.stringify(list);
+  if (sig === jobsSig) return;
+  jobsSig = sig;
+  const box = $("jlist");
+  box.replaceChildren();
+  if (!s.configured) { box.append(el("div", "thought", "Job search isn't set up. Put config.json, profile.json and resume.txt in the jobs folder on the server.")); return; }
+  if (!list.length) box.append(el("div", "thought", "Nothing here yet."));
+  for (const j of list) box.append(jobCard(j, s));
+}
+function jobCard(j, s){
+  const c = el("div", "card job");
+  const top = el("div", "jtop");
+  top.append(el("span", "score " + (j.score >= s.strong ? "strong" : j.score >= s.good ? "good" : ""), String(j.score)), el("strong", null, j.title));
+  c.append(top, el("div", "tool", [j.company, j.location, j.years != null ? j.years + "+ years" : ""].filter(Boolean).join(" \u00b7 ")));
+  const f = el("div", "flags");
+  if (j.no_sponsorship) f.append(el("span", "flag no", "No sponsorship"));
+  else if (j.sponsors) f.append(el("span", "flag yes", "Sponsors visas"));
+  if (j.prepared) f.append(el("span", "flag", "Answers ready"));
+  if (j.status !== "new") f.append(el("span", "flag", j.status));
+  if (f.childNodes.length) c.append(f);
+  if (j.fit) c.append(el("div", "thought", "Model's view of the fit: " + j.fit));
+  if (j.gaps) c.append(el("div", "thought", "Model's view of the gaps: " + j.gaps));
+  const body = el("div", "jbody");
+  c.append(body);
+  c.onclick = e => { if (!e.target.closest(".jbody")) toggleJob(j.id, body); };
+  if (openJob === j.id) toggleJob(j.id, body, true);
+  return c;
+}
+async function toggleJob(id, body, reopen){
+  if (!reopen && openJob === id) { openJob = null; body.replaceChildren(); return; }
+  if (openBody && openBody !== body) openBody.replaceChildren();
+  openJob = id; openBody = body;
+  let j;
+  try { const r = await fetch("api/jobs/detail?id=" + encodeURIComponent(id)); if (!r.ok) return; j = await r.json(); } catch (e) { return; }
+  body.replaceChildren();
+  if (j.url && j.url.startsWith("https://")) {
+    const a = el("a", "applylink", "Open posting");
+    a.href = j.url; a.target = "_blank"; a.rel = "noopener noreferrer";
+    body.append(a);
+  }
+  if (j.answers) {
+    for (const a of j.answers) {
+      const row = el("div", "ans");
+      row.append(el("div", "q", (a.required ? "* " : "") + a.q), el("div", "tool", KIND[a.kind] || a.kind), pre(a.a || ""));
+      if (a.options && a.options.length) row.append(el("div", "thought", "Options: " + a.options.join(", ")));
+      if (a.kind === "fact" || a.kind === "draft") {
+        const b = el("button", "ghost", "Copy");
+        b.onclick = () => navigator.clipboard.writeText(a.a).then(() => { b.textContent = "Copied"; });
+        row.append(b);
+      }
+      body.append(row);
+    }
+    if (j.note) body.append(el("div", "thought", j.note));
+  } else {
+    const b = el("button", "ghost", "Prepare answers");
+    b.onclick = () => { b.disabled = true; b.textContent = "Preparing, a few minutes"; post("api/jobs/prepare", {id: id}); };
+    body.append(b);
+  }
+  const d = el("details");
+  d.append(el("summary", null, "Posting text"), pre(j.description || ""));
+  body.append(d);
+  const btns = el("div", "btns");
+  for (const [label, st] of [["Applied", "applied"], ["Skip", "skipped"], ["Back to new", "new"]]) {
+    if (st === j.status) continue;
+    const b = el("button", st === "applied" ? "approve" : "ghost", label);
+    b.onclick = () => post("api/jobs/status", {id: id, status: st}).then(() => { openJob = null; jobsSig = ""; loadJobs(); });
+    btns.append(b);
+  }
+  body.append(btns);
+}
+$("jobsbtn").onclick = () => showView(view === "jobs" ? "log" : "jobs");
+$("jfilter").onchange = () => { openJob = null; jobsSig = ""; loadJobs(); };
+$("jrun").onclick = () => post("api/jobs/run").then(() => setTimeout(loadJobs, 500));
+if ("serviceWorker" in navigator) navigator.serviceWorker.addEventListener("message", e => { if (e.data && e.data.view) showView(e.data.view); });
+setInterval(() => { if (view === "jobs") loadJobs(); }, 5000);
+window.addEventListener("hashchange", () => showView(location.hash === "#jobs" ? "jobs" : "log"));
+if (location.hash === "#jobs") showView("jobs");
 setInterval(poll, 1500);
 poll();
 setupAlerts();
