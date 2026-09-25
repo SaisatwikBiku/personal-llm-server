@@ -70,7 +70,7 @@ The server and the tools run as different users. The server runs as `agentd`, wh
 agentd ALL=(agent) NOPASSWD: /opt/agent/venv/bin/python /opt/agent/toolrunner.py *
 ```
 
-An approved command can't approve itself. An iptables rule matched on user ID rejects any connection from the `agent` user to port 8000, so a command can't send a fake approval to the panel. Tailscale's own connection to the panel is unaffected.
+An approved command can't approve itself. Firewall rules matched on user ID reject any connection from the `agent` user to port 8000 on loopback and to every Tailscale address, so a command can't send a fake approval to the panel, either directly or through `tailscale serve` on the machine's own tailnet address. Tailscale's own connection to the panel runs as root and is unaffected.
 
 The code in `/opt/agent` belongs to my own account, so neither service user can modify it.
 
@@ -87,7 +87,7 @@ toolrunner.py         runs one tool as the agent user
 requirements.txt
 deploy/
   agent-web.service           systemd unit for the panel (runs as agentd)
-  agent-firewall.service      blocks the agent user from port 8000
+  agent-firewall.service      blocks the agent user from the panel and the tailnet
   sudoers-agentd              the single sudo rule
   logrotate-agent             log rotation for the action log
   ollama-override.conf        Ollama settings (keep model loaded, 8k context, one model)

@@ -2,8 +2,8 @@
 """Phase 3: web control panel for the local agent.
 
 Reuses the prompt, model call and tools from agent.py (same folder).
-Run from /opt/agent as the agent user:
-    sudo -u agent -H /opt/agent/venv/bin/uvicorn server:app --host 127.0.0.1 --port 8000
+Runs from /opt/agent as the agentd user (see deploy/agent-web.service); tools run
+as the agent user through toolrunner.py when AGENT_USE_TOOLRUNNER=1.
 """
 import base64
 import json

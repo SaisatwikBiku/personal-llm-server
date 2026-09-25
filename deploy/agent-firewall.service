@@ -2,11 +2,19 @@
 Description=Block the agent user from the control panel port
 Before=agent-web.service
 
+# Rule 1 blocks the panel on loopback. Rules 2 and 3 block every Tailscale
+# address: tailscale serve publishes the panel on this machine's tailnet IP and
+# forwards to 127.0.0.1:8000 as root, so rule 1 alone doesn't stop that path.
+# They also keep the agent user off Sai's other tailnet devices.
 [Service]
 Type=oneshot
 RemainAfterExit=yes
 ExecStart=/usr/sbin/iptables -I OUTPUT -o lo -p tcp --dport 8000 -m owner --uid-owner agent -j REJECT
-ExecStop=/usr/sbin/iptables -D OUTPUT -o lo -p tcp --dport 8000 -m owner --uid-owner agent -j REJECT
+ExecStart=/usr/sbin/iptables -I OUTPUT -d 100.64.0.0/10 -m owner --uid-owner agent -j REJECT
+ExecStart=/usr/sbin/ip6tables -I OUTPUT -d fd7a:115c:a1e0::/48 -m owner --uid-owner agent -j REJECT
+ExecStop=-/usr/sbin/iptables -D OUTPUT -o lo -p tcp --dport 8000 -m owner --uid-owner agent -j REJECT
+ExecStop=-/usr/sbin/iptables -D OUTPUT -d 100.64.0.0/10 -m owner --uid-owner agent -j REJECT
+ExecStop=-/usr/sbin/ip6tables -D OUTPUT -d fd7a:115c:a1e0::/48 -m owner --uid-owner agent -j REJECT
 
 [Install]
 WantedBy=multi-user.target

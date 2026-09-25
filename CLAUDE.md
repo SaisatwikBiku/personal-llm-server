@@ -48,7 +48,7 @@ Network is Wi-Fi only, configured in `/etc/netplan/50-cloud-init.yaml`. cloud-in
 |---|---|
 | `ollama.service` | Model server on `127.0.0.1:11434`. Override at `/etc/systemd/system/ollama.service.d/override.conf`: `OLLAMA_KEEP_ALIVE=-1`, `OLLAMA_CONTEXT_LENGTH=8192`, `OLLAMA_MAX_LOADED_MODELS=1` |
 | `agent-web.service` | The panel (uvicorn on `127.0.0.1:8000`) as `agentd`, with `AGENT_USE_TOOLRUNNER=1`. Drop-in `agent-web.service.d/push.conf` sets `AGENT_PUSH_SUB` to Sai's email |
-| `agent-firewall.service` | iptables rule rejecting connections from uid `agent` to port 8000 |
+| `agent-firewall.service` | iptables/ip6tables rules rejecting connections from uid `agent` to loopback port 8000 and to all Tailscale addresses (`100.64.0.0/10`, `fd7a:115c:a1e0::/48`) |
 | `agent-update.timer` / `.service` | Pulls and deploys `main` every 5 minutes |
 | `wifi-powersave-off.service` | Turns off Intel Wi-Fi power saving at boot (oneshot, shows inactive after running) |
 | `docker` + container `searxng` | SearXNG on `127.0.0.1:8888`, `--restart unless-stopped` |
@@ -117,7 +117,7 @@ The model is assumed to be sometimes wrong and sometimes manipulated by text it 
 1. Any tool with side effects or outbound network access needs Sai's approval. `web_search` and `fetch_url` stay approval-gated because queries and URLs can carry data out.
 2. Approval cards show the exact command, path and full content preview, not a model-written summary.
 3. The panel runs as `agentd`; tools run as `agent`. The sudo rule is exactly `agentd ALL=(agent) NOPASSWD: /opt/agent/venv/bin/python /opt/agent/toolrunner.py *`. Don't widen it.
-4. The `agent` user must not be able to reach port 8000 (the firewall rule) or read `/home/agentd`. Verify with `sudo -u agent curl -s -m 3 http://127.0.0.1:8000/api/state; echo $?` (expect 7) and `sudo -u agent ls /home/agentd` (expect permission denied).
+4. The `agent` user must not be able to reach the panel by any route or read `/home/agentd`. There are two routes: loopback port 8000, and `tailscale serve` on this machine's own tailnet address, which `tailscaled` forwards to port 8000 as root, so the port 8000 rule alone doesn't cover it. The firewall unit blocks both. Verify all three: `sudo -u agent curl -s -m 3 http://127.0.0.1:8000/api/state; echo $?` (expect 7), `sudo -u agent curl -s -m 5 -o /dev/null -w "%{http_code}\n" https://sai-ai.<tailnet>.ts.net/api/state` (expect 000), and `sudo -u agent ls /home/agentd` (expect permission denied). Before 2026-09-25 only the first rule existed and the second check returned 200.
 5. The panel binds to `127.0.0.1` only and is exposed solely through `tailscale serve` (tailnet only). Never bind to `0.0.0.0` and never use `tailscale funnel`.
 6. Code in `/opt/agent` stays root-owned so neither service user can change what runs.
 7. The deploy script applies only the four code files. Files under `deploy/` change root-level configuration and are applied by hand after review.
