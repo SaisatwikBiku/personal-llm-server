@@ -801,7 +801,7 @@ setupAlerts();
 FILL_SCRIPT = r"""// ==UserScript==
 // @name         Agent application autofill
 // @namespace    local-agent
-// @version      1
+// @version      2
 // @description  Fills job application forms with answers from the agent panel. You review and submit.
 // @match        https://job-boards.greenhouse.io/*
 // @match        https://boards.greenhouse.io/*
@@ -1027,7 +1027,7 @@ FILL_SCRIPT = r"""// ==UserScript==
 
   // ---------- floating panel ----------
 
-  let box, body;
+  let box, body, pill;
   function node(tag, text, style) {
     const e = document.createElement(tag);
     if (text !== undefined) e.textContent = text;
@@ -1035,13 +1035,35 @@ FILL_SCRIPT = r"""// ==UserScript==
     return e;
   }
   const BTN = "font:600 14px -apple-system,system-ui,sans-serif;border:0;border-radius:8px;padding:9px 12px;cursor:pointer;";
+  const SHADOW = "z-index:2147483647;box-shadow:0 6px 24px rgba(0,0,0,.35);font:14px/1.4 -apple-system,system-ui,sans-serif;";
+
+  // Minimized, the panel is a small round button in the corner, so it never
+  // covers the form. The choice is remembered for the site.
+  function minimize(on) {
+    box.style.display = on ? "none" : "block";
+    pill.style.display = on ? "block" : "none";
+    try { localStorage.setItem("agent-fill-min", on ? "1" : "0"); } catch (e) {}
+  }
+
   function ui() {
-    box = node("div", undefined, "position:fixed;right:12px;bottom:12px;z-index:2147483647;max-width:340px;max-height:70vh;overflow:auto;background:#1f1e1c;color:#ebeae4;border-radius:12px;padding:10px;font:14px/1.4 -apple-system,system-ui,sans-serif;box-shadow:0 6px 24px rgba(0,0,0,.35)");
-    const go = node("button", "Fill from agent", BTN + "background:#57a37a;color:#fff;width:100%");
+    box = node("div", undefined, SHADOW + "position:fixed;right:12px;bottom:12px;width:min(340px,calc(100vw - 24px));background:#1f1e1c;color:#ebeae4;border-radius:12px;padding:10px");
+    const row = node("div", undefined, "display:flex;gap:8px");
+    const go = node("button", "Fill from agent", BTN + "background:#57a37a;color:#fff;flex:1");
     go.onclick = () => { go.disabled = true; run().finally(() => { go.disabled = false; go.textContent = "Fill again"; }); };
-    body = node("div");
-    box.append(go, body);
-    document.body.append(box);
+    const min = node("button", "\u2013", BTN + "background:#33322e;color:#ebeae4;width:40px");
+    min.title = "Minimize";
+    min.setAttribute("aria-label", "Minimize");
+    min.onclick = () => minimize(true);
+    row.append(go, min);
+    body = node("div", undefined, "max-height:45vh;overflow:auto");
+    box.append(row, body);
+    pill = node("button", "Agent", SHADOW + BTN + "position:fixed;right:12px;bottom:12px;background:#57a37a;color:#fff;border-radius:22px;padding:10px 14px;display:none");
+    pill.setAttribute("aria-label", "Show the autofill panel");
+    pill.onclick = () => minimize(false);
+    document.body.append(box, pill);
+    let saved = "0";
+    try { saved = localStorage.getItem("agent-fill-min") || "0"; } catch (e) {}
+    minimize(saved === "1");
   }
   function say(text) { body.replaceChildren(node("div", text, "margin-top:8px")); }
 
