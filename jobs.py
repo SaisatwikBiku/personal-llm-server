@@ -37,6 +37,7 @@ MAX_DESC_CHARS = 6000     # stored per job, for the panel
 SCORE_DESC_CHARS = 2500   # posting text sent to the model when scoring
 DRAFT_DESC_CHARS = 1500   # posting text sent to the model when drafting
 MAX_DISCOVERED = 60       # companies found through search, most recent kept
+SCORE_VERSION = 2         # bump to rescore everything with a new method
 SEEN_DAYS = 90            # forget skipped openings after this; they are re-checked if still listed
 TOKEN_RE = re.compile(r"^[A-Za-z0-9_.-]{1,80}$")
 
@@ -48,7 +49,7 @@ DEFAULTS = {
               "data engineer", "database administrator", "database engineer", "database reliability", "swe"],
     "exclude_titles": ["senior", "sr", "staff", "principal", "lead", "manager", "director",
                        "head", "vp", "architect", "distinguished", "fellow", "intern",
-                       "internship", "iii", "iv"],
+                       "internship", "iii", "iv", "3", "4"],
     "search_roles": ["software engineer new grad", "backend engineer", "full stack engineer",
                      "data engineer", "database administrator"],
     "search": True,
@@ -59,8 +60,7 @@ DEFAULTS = {
     "draft_model": "qwen3:8b",  # the 4B invented project details in drafts; the 8B stuck to the resume
     "max_drafts_per_run": 15,
     "good_score": 60,
-    "strong_score": 75,
-    "skills": [],
+    "strong_score": 72,
 }
 
 db_lock = threading.Lock()
@@ -211,14 +211,6 @@ def years_required(text):
     return min(found) if found else None
 
 
-def skills_in(text, skills):
-    out = []
-    for s in skills:
-        if re.search(r"(?<![\w.+#])" + re.escape(s) + r"(?![\w+#])", text, re.I):
-            out.append(s)
-    return out
-
-
 # ---------- sources ----------
 
 def get_json(url):
@@ -318,25 +310,72 @@ def discover(cfg):
 
 # ---------- model ----------
 
-SCORE_PROMPT = """You compare job postings with a candidate's resume and rate the fit.
+# The model only extracts facts from the posting; code compares them with the resume
+# and does the arithmetic. Asked for a 0-100 fit score directly, the 4B gave 85 to
+# almost every software role (97 of 205 in the first run).
+EXTRACT_PROMPT = """You read job postings and extract their requirements.
 
-Resume:
-{resume}
+Reply with JSON:
+- "required_skills": the technical skills the posting requires, as a candidate would list them on a resume: languages, frameworks, databases, cloud services, tools, and technical areas such as "distributed systems" or "machine learning". For example: Python, React, PostgreSQL, Kubernetes, distributed systems. At most 10, each 1 to 3 words. Leave out product areas, duties, soft skills, degrees and years of experience.
+- "level": the seniority the posting asks for: "new grad", "junior", "mid", "senior", "staff", or "unclear".
+- "summary": what the role works on, in under 15 words."""
 
-Rate the fit from 0 to 100:
-- 80 to 100: most required skills are in the resume and the level matches (new grad to mid level).
-- 60 to 79: a reasonable fit with some gaps.
-- 40 to 59: several required skills are missing.
-- 0 to 39: a different field, or clearly too senior.
-Use only facts in the resume. Before naming a gap, check that the skill is really missing from the resume.
-Reply with JSON: {{"score": number, "fit": "under 20 words on the strongest match", "gaps": "under 20 words on the biggest missing requirement"}}."""
-
-SCORE_SCHEMA = {
+EXTRACT_SCHEMA = {
     "type": "object",
-    "properties": {"score": {"type": "integer"}, "fit": {"type": "string"},
-                   "gaps": {"type": "string"}},
-    "required": ["score", "fit", "gaps"],
+    "properties": {
+        "required_skills": {"type": "array", "items": {"type": "string"}},
+        "level": {"type": "string", "enum": ["new grad", "junior", "mid", "senior", "staff", "unclear"]},
+        "summary": {"type": "string"},
+    },
+    "required": ["required_skills", "level", "summary"],
 }
+
+LEVEL_FIT = {"new grad": 1.0, "junior": 1.0, "mid": 0.8, "unclear": 0.7, "senior": 0.2, "staff": 0.0}
+SKILL_ALIASES = [  # applied to both the resume and the skills before comparing
+    (r"\bc\+\+", "cpp"), (r"\bc#", "csharp"), (r"\bgcp\b|google cloud platform", "google cloud"),
+    (r"\bk8s\b", "kubernetes"), (r"\bgolang\b", "go"), (r"\bpostgres(ql)?\b", "postgresql"),
+    (r"\breact\.?js\b", "react"), (r"\bnode\.?js\b|\bnode\b", "nodejs"), (r"\bnext\.?js\b", "nextjs"),
+    (r"\bjs\b", "javascript"), (r"\bts\b", "typescript"), (r"\brestful\b", "rest"),
+    (r"\bapis\b", "api"), (r"\bspringboot\b", "spring boot"), (r"\bamazon web services\b", "aws"),
+    (r"\bci\s*/\s*cd\b", "ci cd"), (r"\bmicro-services\b", "microservices"),
+]
+SKILL_STOPWORDS = {"and", "or", "of", "the", "with", "in", "a", "an", "for", "to", "experience",
+                   "knowledge", "skills", "skill", "development", "programming", "language",
+                   "languages", "framework", "frameworks", "tool", "tools", "technologies",
+                   "modern", "strong", "proficiency", "familiarity", "using", "based", "etc"}
+
+
+def skill_text(text):
+    """Normalize text for phrase matching: aliases, lowercase words, crude singulars."""
+    t = text.lower()
+    for pat, rep in SKILL_ALIASES:
+        t = re.sub(pat, rep, t)
+    words = (w.strip(".") for w in re.findall(r"[a-z0-9][a-z0-9+#.]*", t))
+    # the same crude singular form on both sides is enough for matching
+    words = [w[:-1] if len(w) > 3 and w.endswith("s") and not w.endswith("ss") else w
+             for w in words if w and w not in SKILL_STOPWORDS]
+    return " ".join(words)
+
+
+def compare_skills(skills, resume_norm):
+    """Split required skills into (has, missing). A skill counts when its words appear
+    together in the resume; "C/C++" or "Java or Kotlin" count when either one does."""
+    has, missing = [], []
+    haystack = f" {resume_norm} "
+    for s in skills:
+        options = [skill_text(o) for o in re.split(r"/|,|\bor\b", s.replace("C/C++", "C, C++"))]
+        options = [o for o in options if o]
+        if options:
+            (has if any(f" {o} " in haystack for o in options) else missing).append(s.strip())
+    return has, missing
+
+
+def fit_score(has, missing, level, years, no_sponsorship):
+    total = len(has) + len(missing)
+    skill = len(has) / total if total else 0.5
+    yrs = 1.0 if years is None or years <= 2 else {3: 0.85, 4: 0.7}.get(years, 0.5)
+    score = 100 * (0.65 * skill + 0.25 * LEVEL_FIT.get(level, 0.7) + 0.10 * yrs)
+    return max(0, round(score) - (10 if no_sponsorship else 0))
 
 DRAFT_PROMPT = """You write answers to job application questions for the candidate whose resume is below.
 
@@ -369,17 +408,23 @@ def restore_default_model():
         pass
 
 
-def score_job(job, resume, is_busy):
-    system = SCORE_PROMPT.format(resume=resume)
-    user = (f"Company: {job['company']}\nTitle: {job['title']}\nLocation: {job['location']}\n\n"
-            f"Posting:\n{job['description'][:SCORE_DESC_CHARS]}")
-    resp = model_call([{"role": "system", "content": system}, {"role": "user", "content": user}],
-                      is_busy, format=SCORE_SCHEMA, options={"temperature": 0.2, "num_predict": 150})
+def score_job(job, resume_norm, is_busy):
+    """Return the fields to store for one posting: extracted facts and the computed score."""
+    user = (f"Title: {job['title']}\n\nPosting:\n{job['description'][:SCORE_DESC_CHARS]}")
+    resp = model_call([{"role": "system", "content": EXTRACT_PROMPT}, {"role": "user", "content": user}],
+                      is_busy, format=EXTRACT_SCHEMA, options={"temperature": 0.1, "num_predict": 200})
     try:
         out = json.loads(resp.message.content or "")
-        return max(0, min(100, int(out["score"]))), str(out.get("fit", "")), str(out.get("gaps", ""))
+        skills = [str(s) for s in out["required_skills"]][:10]
+        level = out["level"] if out["level"] in LEVEL_FIT else "unclear"
+        summary = str(out.get("summary", ""))
     except (ValueError, KeyError, TypeError):
-        return None, "", "The model's reply could not be read."
+        return {"score": None, "summary": "The model's reply could not be read.",
+                "score_version": SCORE_VERSION}
+    has, missing = compare_skills(skills, resume_norm)
+    return {"score": fit_score(has, missing, level, job.get("years"), job.get("no_sponsorship")),
+            "has_skills": has, "missing_skills": missing, "level": level, "summary": summary,
+            "score_version": SCORE_VERSION}
 
 
 def draft_answer(job, question, resume, is_busy, model):
@@ -412,6 +457,7 @@ FACTS = [  # (label pattern, profile key); first match wins
     (r"relocat", "relocate"),
     (r"in.?office|on.?site|hybrid|days (a|per) week|commut", "in_office"),
     (r"where are you (currently )?(located|based)|current (location|city)|^location|city", "location"),
+    (r"^country", "country"),
     (r"hear about|how did you (find|learn)|referr", "heard_about"),
     (r"start date|earliest.*start|when (can|could) you start|available to start|notice period", "start_date"),
     (r"salary|compensation|pay expectation", "salary"),
@@ -576,15 +622,16 @@ def _run(is_busy):
 
     # Openings stored but left unscored by an earlier run (a restart mid-run) are scored too.
     def backlog(db):
-        return [j for j in db["jobs"].values() if j.get("score") is None and j["status"] == "new"]
+        return [j for j in db["jobs"].values()
+                if j.get("score_version") != SCORE_VERSION and j["status"] == "new"]
     todo = update_db(backlog)
     for job in candidates:
         desc = job["description"]
         job.update(description=desc[:MAX_DESC_CHARS], found=stamp(), status="new", score=None,
-                   fit="", gaps="", answers=None, note="",
+                   answers=None, note="",
                    no_sponsorship=bool(NO_SPONSOR_RE.search(desc)),
                    sponsors=bool(SPONSOR_RE.search(desc)) and not NO_SPONSOR_RE.search(desc),
-                   years=years_required(desc), skills=skills_in(desc, cfg["skills"]))
+                   years=years_required(desc))
         if job["url"].startswith("https://"):
             todo.append(job)
     todo.sort(key=lambda j: j.get("posted") or "", reverse=True)
@@ -596,16 +643,17 @@ def _run(is_busy):
             db["jobs"].setdefault(j["id"], j)
     update_db(store)
 
-    # 2. Score each candidate. The resume sits in the system prompt so Ollama's
-    #    prefix cache covers it after the first call.
+    # 2. Score each candidate. The system prompt is the same for every posting, so
+    #    Ollama's prefix cache covers it.
+    resume_norm = skill_text(resume)
     for i, job in enumerate(todo, 1):
         set_progress(f"scoring {job['company']}: {job['title']}", i, len(todo))
-        score, fit, gaps = score_job(job, resume, is_busy)
+        result = score_job(job, resume_norm, is_busy)
         stats["scored"] += 1
 
-        def save_score(db, jid=job["id"], s=score, f=fit, g=gaps):
+        def save_score(db, jid=job["id"], r=result):
             if jid in db["jobs"]:
-                db["jobs"][jid].update(score=s, fit=f, gaps=g, scored=stamp())
+                db["jobs"][jid].update(r, scored=stamp())
         update_db(save_score)
 
     # 3. Prepare answers for the best new matches.
@@ -664,7 +712,11 @@ def digest(notify):
     fresh.sort(key=lambda j: -j["score"])
     strong = sum(1 for j in fresh if j["score"] >= cfg["strong_score"])
     if fresh:
-        top = "; ".join(f"{j['company']}: {j['title']} ({j['score']})" for j in fresh[:3])
+        def line(j):
+            n = len(j.get("has_skills") or []) + len(j.get("missing_skills") or [])
+            skills = f", {len(j['has_skills'])}/{n} skills" if n else ""
+            return f"{j['company']}: {j['title']} ({j['score']}{skills})"
+        top = "; ".join(line(j) for j in fresh[:5])
         body = f"{len(fresh)} new matches, {strong} strong. {top}"
     else:
         body = f"No new matches. Scored {last.get('scored', 0)} openings from {last.get('boards', 0)} companies."
@@ -692,8 +744,8 @@ def tick(notify, is_busy):
 
 # ---------- panel helpers ----------
 
-SUMMARY_KEYS = ("id", "company", "title", "location", "url", "posted", "status", "score", "fit",
-                "gaps", "no_sponsorship", "sponsors", "years", "skills", "found")
+SUMMARY_KEYS = ("id", "company", "title", "location", "url", "posted", "status", "score", "summary",
+                "level", "has_skills", "missing_skills", "no_sponsorship", "sponsors", "years", "found")
 
 
 def summary():
@@ -711,14 +763,87 @@ def summary():
         "last_digest_at": meta.get("last_digest_at"),
         "discovered": len(meta.get("discovered", {})),
         "good": cfg["good_score"], "strong": cfg["strong_score"],
-        "unscored": sum(1 for j in db["jobs"].values() if j.get("score") is None),
+        "unscored": sum(1 for j in db["jobs"].values()
+                        if j.get("score_version") != SCORE_VERSION and j["status"] == "new"),
         "jobs": jobs,
     }
 
 
 def detail(job_id):
     with db_lock:
-        return load_db()["jobs"].get(job_id)
+        job = load_db()["jobs"].get(job_id)
+    return job and {**job, "apply_url": apply_url(job)}
+
+
+def apply_url(job):
+    """The page with the application form."""
+    ats = job["id"].split(":", 1)[0]
+    url = job.get("url", "")
+    if ats == "lever" and not url.endswith("/apply"):
+        return url.rstrip("/") + "/apply"
+    if ats == "ashby" and not url.endswith("/application"):
+        return url.rstrip("/") + "/application"
+    return url
+
+
+# ---------- autofill (the userscript in Sai's browser calls these through server.py) ----------
+
+FORM_URL_RE = [
+    ("greenhouse", re.compile(r"^https://(?:job-boards|boards)\.greenhouse\.io/(?:embed/job_app\?.*|([A-Za-z0-9_-]+)/jobs/(\d+))")),
+    ("lever", re.compile(r"^https://jobs\.lever\.co/([A-Za-z0-9_.-]+)/([0-9a-f-]{36})")),
+    ("ashby", re.compile(r"^https://jobs\.ashbyhq\.com/([A-Za-z0-9_.%-]+)/([0-9a-f-]{36})")),
+]
+
+
+def job_id_for_url(url):
+    for ats, pat in FORM_URL_RE:
+        m = pat.match(url or "")
+        if not m:
+            continue
+        if ats == "greenhouse" and not m.group(1):  # embedded form: ?for=<board>&token=<job id>
+            q = urllib.parse.parse_qs(urllib.parse.urlsplit(url).query)
+            board, native = (q.get("for") or [""])[0], (q.get("token") or [""])[0]
+        else:
+            board, native = m.group(1), m.group(2)
+        if board and native:
+            return f"{ats}:{urllib.parse.quote(board.lower())}:{native}"
+    return None
+
+
+def norm_label(text):
+    return re.sub(r"[^a-z0-9]+", " ", (text or "").lower()).strip()
+
+
+def fill(page_url, fields):
+    """Answers for the fields of an application form open in Sai's browser. Uses the
+    answers prepared for that job when it's in jobs.json, and profile.json otherwise.
+    Returns a value only for facts, drafts and the resume; everything else is Sai's."""
+    profile = load_json(JOBS_DIR / "profile.json", {})
+    job = detail(job_id_for_url(page_url) or "")
+    stored = {norm_label(a["q"]): a for a in (job or {}).get("answers") or []}
+    spare_drafts = [a for a in stored.values() if a["kind"] == "draft" and a.get("a")]
+    out = []
+    for i, f in enumerate(fields):
+        label = str(f.get("label", ""))[:300]
+        ftype = str(f.get("type", ""))
+        options = [str(o)[:200] for o in (f.get("options") or [])][:100]
+        a = stored.get(norm_label(label))
+        if not (a and a.get("a") and a["kind"] in ("fact", "draft")):
+            a = answer_for(label, [{"type": "input_file" if ftype == "file" else ftype,
+                                    "values": [{"label": o} for o in options]}], profile)
+            if a["kind"] == "draft":  # reuse a prepared draft only for a question like it
+                fits = spare_drafts and re.search(r"why|interest|cover letter|motivat", label, re.I)
+                a = spare_drafts.pop(0) if fits else {"kind": "you"}
+        value = a.get("a") if a["kind"] in ("fact", "draft") else None
+        out.append({"i": i, "kind": a["kind"], "value": value})
+    name = str(profile.get("full_name") or "Resume").replace(" ", "_")
+    return {"job": job and {"id": job["id"], "company": job["company"], "title": job["title"]},
+            "answers": out, "resume_name": f"{name}_Resume.pdf" if name != "Resume" else "Resume.pdf"}
+
+
+def resume_pdf():
+    path = JOBS_DIR / "resume.pdf"
+    return path.read_bytes() if path.exists() else None
 
 
 def set_status(job_id, status):

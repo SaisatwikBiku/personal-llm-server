@@ -56,7 +56,7 @@ Several design choices come straight from the benchmarks. The system prompt is s
 
 `toolrunner.py` is a short helper that executes one tool as the unprivileged `agent` user. The server calls it through sudo, which is the core of the security model.
 
-`jobs.py` is a job search that runs overnight inside the panel process. It reads the public job board APIs of Greenhouse, Lever and Ashby for a list of companies, finds more companies through site-restricted SearXNG searches, and drops postings whose title, location, required years or citizenship and clearance requirements don't fit. The 4B model scores each remaining posting against my resume in about 27 seconds, with the resume at the start of the prompt so Ollama's cache covers it. For the strongest matches, the 8B model drafts answers to the form's open questions (the 4B invented project details in testing; the 8B stuck to the resume). Factual answers such as name, contact details and work authorization come from a profile file, never from the model. A push notification each morning lists the new matches, and a Jobs view in the panel shows each one with its score, the prepared answers with copy buttons, and a link to the posting. It never submits an application: the Greenhouse and Lever application forms are behind reCAPTCHA and hCaptcha, and forms include legal agreements that I should read myself.
+`jobs.py` is a job search that runs overnight inside the panel process. It reads the public job board APIs of Greenhouse, Lever and Ashby for a list of companies, finds more companies through site-restricted SearXNG searches, and drops postings whose title, location, required years or citizenship and clearance requirements don't fit. For each remaining posting, the 4B model lists the required skills and the seniority level, in about 20 seconds, and code scores the fit: how many of those skills appear as phrases in my resume, whether the level is new grad to mid, the years asked for, and whether the company sponsors visas. Asked for a fit score directly, the 4B gave nearly every software role 85. For the strongest matches, the 8B model drafts answers to the form's open questions (the 4B invented project details in testing; the 8B stuck to the resume). Factual answers such as name, contact details and work authorization come from a profile file, never from the model. A push notification each morning lists the new matches, and a Jobs view in the panel shows each one with its score, the skills it matched and missed, the prepared answers, and a link to the application. A userscript fills the application form itself (see below). It never submits an application: the Greenhouse and Lever application forms are behind reCAPTCHA and hCaptcha, and forms include legal agreements that I should read myself.
 
 The panel listens only on `127.0.0.1:8000`. `tailscale serve` publishes it over HTTPS to devices signed into my tailnet and nowhere else.
 
@@ -254,7 +254,16 @@ sudo install -o agentd -g agentd -m 600 ~/profile.json ~/resume.txt /home/agentd
 
 Fill in `profile.json` from `deploy/jobs-profile.example.json`. An empty field makes the matching form question show up as one to answer yourself. Edit `config.json` to change roles, companies (board names as they appear in the job board URLs), the run and digest times, and the score thresholds; the next run picks up the change without a restart. The first run happens at the next `run_at` time, or right away from Run now in the Jobs view.
 
-Each run can score up to 200 postings (`max_scored_per_run`), about 90 minutes of model time, and the rest wait for the next night. Panel tasks take priority: the job search waits whenever a task is running.
+Each run can score up to 200 postings (`max_scored_per_run`), about 70 minutes of model time, and the rest wait for the next night. Panel tasks take priority: the job search waits whenever a task is running.
+
+### Autofill
+
+Copy the resume PDF into the jobs folder as `resume.pdf` (owned by `agentd`, mode 600, like the other files). Then install the userscript from the Jobs view (Autofill script):
+
+- iPhone: install the free Userscripts app from the App Store, turn it on in Settings > Apps > Safari > Extensions and allow it on greenhouse.io, lever.co and ashbyhq.com, then open the Autofill script link in Safari and install it.
+- Mac: install Tampermonkey (Chrome) or Userscripts (Safari), then open the Autofill script link.
+
+On an application page, tap Fill from agent. It fills text fields, dropdowns and yes/no questions from the answers prepared for that job (or from `profile.json` for any other job on those sites), attaches the resume, and outlines each field: green filled, blue a draft to read, orange for you. Consents, legal and demographic questions, and anything it has no answer for stay empty. Check everything, solve the CAPTCHA, submit, and tap Mark applied. It needs Tailscale on, since it asks the panel for the answers.
 
 ## Running a laptop as a server
 

@@ -8,6 +8,7 @@ as the agent user through toolrunner.py when AGENT_USE_TOOLRUNNER=1.
 import base64
 import json
 import os
+import re
 import subprocess
 import threading
 import time
@@ -393,6 +394,42 @@ def jobs_prepare(body: JobIn, request: Request):
     return {"ok": True}
 
 
+class FillIn(BaseModel):
+    url: str
+    fields: list[dict]
+
+
+@app.post("/api/jobs/fill")
+def jobs_fill(body: FillIn, request: Request):
+    check_user(request)
+    if len(body.fields) > 200:
+        raise HTTPException(400, "Too many fields")
+    return jobs.fill(body.url, body.fields)
+
+
+@app.get("/api/jobs/resume")
+def jobs_resume(request: Request):
+    check_user(request)
+    data = jobs.resume_pdf()
+    if data is None:
+        raise HTTPException(404, "No resume.pdf in the jobs folder")
+    return {"data": base64.b64encode(data).decode()}
+
+
+@app.get("/jobs-fill.user.js")
+def fill_script(request: Request):
+    """The autofill userscript, pointed at whatever address the panel was opened on,
+    so the tailnet name never has to be in the repo."""
+    check_user(request)
+    host = request.headers.get("host", "")
+    if not re.fullmatch(r"[A-Za-z0-9.-]+(:\d+)?", host):
+        raise HTTPException(400, "Bad host")
+    local = host.split(":")[0] in ("localhost", "127.0.0.1")
+    panel = f"{'http' if local else 'https'}://{host}"
+    script = FILL_SCRIPT.replace("__PANEL__", panel).replace("__HOST__", host.split(":")[0])
+    return Response(script, media_type="text/javascript", headers={"Cache-Control": "no-cache"})
+
+
 class SubscriptionIn(BaseModel):
     endpoint: str
     keys: dict
@@ -514,6 +551,7 @@ input{font:inherit;font-size:16px;color:var(--fg);background:var(--card);border:
 #send{background:var(--accent);color:#fff}
 #jobs{display:none;flex:1;overflow-y:auto;padding:12px 14px;-webkit-overflow-scrolling:touch}
 .jbar{display:flex;gap:8px;align-items:center;margin-bottom:10px}
+.jbar a.ghost{text-decoration:none;border-radius:8px;margin-left:auto}
 .jbar select{font:inherit;font-size:13px;color:var(--fg);background:var(--card);border:1px solid var(--line);border-radius:8px;padding:5px 6px}
 #jmeta{font-size:13px;color:var(--muted);margin-bottom:10px}
 .job{margin-bottom:10px;cursor:pointer}
@@ -542,6 +580,7 @@ input{font:inherit;font-size:16px;color:var(--fg);background:var(--card);border:
   <div class="jbar">
     <select id="jfilter"><option value="new">New</option><option value="applied">Applied</option><option value="skipped">Skipped</option><option value="all">All</option></select>
     <button class="ghost" id="jrun">Run now</button>
+    <a class="ghost" id="jsetup" href="jobs-fill.user.js">Autofill script</a>
   </div>
   <div id="jmeta"></div>
   <div id="jlist"></div>
@@ -681,15 +720,19 @@ function jobCard(j, s){
   const c = el("div", "card job");
   const top = el("div", "jtop");
   top.append(el("span", "score " + (j.score >= s.strong ? "strong" : j.score >= s.good ? "good" : ""), String(j.score)), el("strong", null, j.title));
-  c.append(top, el("div", "tool", [j.company, j.location, j.years != null ? j.years + "+ years" : ""].filter(Boolean).join(" \u00b7 ")));
+  c.append(top, el("div", "tool", [j.company, j.location, j.level, j.years != null ? j.years + "+ years" : ""].filter(Boolean).join(" \u00b7 ")));
   const f = el("div", "flags");
   if (j.no_sponsorship) f.append(el("span", "flag no", "No sponsorship"));
   else if (j.sponsors) f.append(el("span", "flag yes", "Sponsors visas"));
   if (j.prepared) f.append(el("span", "flag", "Answers ready"));
   if (j.status !== "new") f.append(el("span", "flag", j.status));
   if (f.childNodes.length) c.append(f);
-  if (j.fit) c.append(el("div", "thought", "Model's view of the fit: " + j.fit));
-  if (j.gaps) c.append(el("div", "thought", "Model's view of the gaps: " + j.gaps));
+  if (j.summary) c.append(el("div", "thought", j.summary));
+  const has = j.has_skills || [], miss = j.missing_skills || [];
+  if (has.length + miss.length) {
+    c.append(el("div", "thought", "Has " + has.length + " of " + (has.length + miss.length) + " required skills" + (has.length ? ": " + has.join(", ") : "")));
+    if (miss.length) c.append(el("div", "thought", "Missing: " + miss.join(", ")));
+  }
   const body = el("div", "jbody");
   c.append(body);
   c.onclick = e => { if (!e.target.closest(".jbody")) toggleJob(j.id, body); };
@@ -703,9 +746,9 @@ async function toggleJob(id, body, reopen){
   let j;
   try { const r = await fetch("api/jobs/detail?id=" + encodeURIComponent(id)); if (!r.ok) return; j = await r.json(); } catch (e) { return; }
   body.replaceChildren();
-  if (j.url && j.url.startsWith("https://")) {
-    const a = el("a", "applylink", "Open posting");
-    a.href = j.url; a.target = "_blank"; a.rel = "noopener noreferrer";
+  if (j.apply_url && j.apply_url.startsWith("https://")) {
+    const a = el("a", "applylink", "Open application");
+    a.href = j.apply_url; a.target = "_blank"; a.rel = "noopener noreferrer";
     body.append(a);
   }
   if (j.answers) {
@@ -750,4 +793,315 @@ poll();
 setupAlerts();
 </script>
 </body></html>
+"""
+
+# Installed in Sai's browser (Userscripts on iPhone Safari, Tampermonkey or Userscripts on
+# the Mac). It fills the form it's on and never submits it: the CAPTCHA, the consents
+# and the Submit button stay with Sai. Page text is only ever set with textContent.
+FILL_SCRIPT = r"""// ==UserScript==
+// @name         Agent application autofill
+// @namespace    local-agent
+// @version      1
+// @description  Fills job application forms with answers from the agent panel. You review and submit.
+// @match        https://job-boards.greenhouse.io/*
+// @match        https://boards.greenhouse.io/*
+// @match        https://jobs.lever.co/*
+// @match        https://jobs.ashbyhq.com/*
+// @grant        GM.xmlHttpRequest
+// @grant        GM_xmlhttpRequest
+// @connect      __HOST__
+// @updateURL    __PANEL__/jobs-fill.user.js
+// @downloadURL  __PANEL__/jobs-fill.user.js
+// ==/UserScript==
+(function () {
+  "use strict";
+  const PANEL = "__PANEL__";
+  const KIND = {legal: "Read and answer yourself", eeo: "Voluntary, your choice", you: "Answer yourself",
+                file: "Attach the file yourself", draft: "No draft for this one, answer yourself"};
+  const COLORS = {filled: "#2f9e62", review: "#2f6fd6", you: "#e08a1e"};
+  const gmx = (typeof GM !== "undefined" && GM.xmlHttpRequest) ? GM.xmlHttpRequest.bind(GM)
+            : (typeof GM_xmlhttpRequest !== "undefined" ? GM_xmlhttpRequest : null);
+  const sleep = ms => new Promise(r => setTimeout(r, ms));
+  const clean = t => (t || "").replace(/[*✱]/g, "").replace(/\s+/g, " ").trim();
+  const norm = s => (s || "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+
+  function api(method, path, body) {
+    return new Promise((resolve, reject) => {
+      if (!gmx) return reject(new Error("This userscript manager can't make cross-site requests."));
+      gmx({
+        method, url: PANEL + path, timeout: 20000,
+        headers: {"Content-Type": "application/json"},
+        data: body ? JSON.stringify(body) : undefined,
+        onload: r => (r.status >= 200 && r.status < 300)
+          ? resolve(JSON.parse(r.responseText)) : reject(new Error("The panel answered " + r.status)),
+        onerror: () => reject(new Error("Can't reach the panel. Is Tailscale on?")),
+        ontimeout: () => reject(new Error("The panel didn't answer in time.")),
+      });
+    });
+  }
+
+  const byIds = ids => clean((ids || "").split(/\s+/).map(id => document.getElementById(id)).filter(Boolean).map(n => n.innerText).join(" "));
+
+  // The question text for a field: the nearest label-like element around it that
+  // holds no inputs of its own (so a "No" radio label never names the question).
+  function questionLabel(el) {
+    for (let p = el.parentElement, k = 0; p && k < 7; p = p.parentElement, k++) {
+      const t = byIds(p.getAttribute("aria-labelledby"));
+      if (t) return t;
+      const l = [...p.children].find(c => !c.contains(el) && !c.querySelector("input, select, textarea")
+        && c.matches("legend, label, .application-label, [class*=label], [class*=Label], [class*=heading], [class*=title]")
+        && clean(c.innerText));
+      if (l) return clean(l.innerText);
+    }
+    return "";
+  }
+
+  function labelFor(el) {
+    if (el.labels && el.labels.length && clean(el.labels[0].innerText)) return clean(el.labels[0].innerText);
+    const t = byIds(el.getAttribute("aria-labelledby")) || clean(el.getAttribute("aria-label"));
+    return t || questionLabel(el) || clean(el.placeholder || el.name || "");
+  }
+
+  // Upload inputs are usually labeled by their button ("Attach"); use the question's label.
+  function fileLabel(el) {
+    const own = labelFor(el);
+    if (!/^(attach|upload|browse|choose file|select file)?$/i.test(own)) return own;
+    return questionLabel(el) || (el.id || el.name || "").replace(/[_-]+/g, " ");
+  }
+
+  function collect() {
+    const fields = [], els = [], radios = new Set();
+    for (const el of document.querySelectorAll("input, textarea, select")) {
+      const type = (el.type || "").toLowerCase();
+      if (el.disabled || ["hidden", "submit", "button", "image", "reset", "password", "search", "checkbox"].includes(type)) continue;
+      if (type === "file") { fields.push({label: fileLabel(el), type: "file", options: []}); els.push(el); continue; }
+      if (el.getAttribute("aria-hidden") === "true" || el.tabIndex < 0) continue;  // validation helpers
+      if (type === "radio") {
+        if (!el.name || radios.has(el.name)) continue;
+        radios.add(el.name);
+        const group = [...document.querySelectorAll("input[type=radio]")].filter(r => r.name === el.name);
+        fields.push({label: questionLabel(el), type: "radio", options: group.map(r => labelFor(r))});
+        els.push(group);
+        continue;
+      }
+      if (!el.offsetParent) continue;  // not shown
+      const combo = el.getAttribute("role") === "combobox";
+      fields.push({
+        label: labelFor(el),
+        type: el.tagName === "TEXTAREA" ? "textarea" : el.tagName === "SELECT" ? "select" : combo ? "combobox" : "text",
+        options: el.tagName === "SELECT" ? [...el.options].map(o => o.text.trim()) : [],
+      });
+      els.push(el);
+    }
+    return {fields, els};
+  }
+
+  function setValue(el, v) {
+    const proto = el.tagName === "TEXTAREA" ? HTMLTextAreaElement.prototype
+                : el.tagName === "SELECT" ? HTMLSelectElement.prototype : HTMLInputElement.prototype;
+    Object.getOwnPropertyDescriptor(proto, "value").set.call(el, v);  // works with React forms
+    el.dispatchEvent(new Event("input", {bubbles: true}));
+    el.dispatchEvent(new Event("change", {bubbles: true}));
+  }
+
+  function pick(options, value) {
+    const v = norm(value);
+    if (!v) return -1;
+    let i = options.findIndex(o => norm(o) === v);
+    if (i < 0) i = options.findIndex(o => { const n = norm(o); return n && (v.startsWith(n + " ") || n.startsWith(v + " ")); });
+    return i;
+  }
+
+  // Option index for a dropdown answer. Place searches also accept the first word:
+  // "Albany, NY" takes "Albany, New York, United States".
+  function pickLoose(labels, value) {
+    let i = pick(labels, value);
+    const first = norm(value).split(" ")[0];
+    if (i < 0) i = labels.findIndex(l => first && norm(l).startsWith(first));
+    return i;
+  }
+
+  // react-select dropdowns (Greenhouse, Ashby) ignore scripted typing, and userscripts
+  // usually run in an isolated world that can't see page components. This helper runs
+  // in the page instead: it finds the component, starts its search and selects the
+  // option. The two sides talk through attributes on the input.
+  function pageHelper() {
+    if (document.documentElement.hasAttribute("data-agent-helper")) return;
+    document.documentElement.setAttribute("data-agent-helper", "1");
+    const norm = s => (s || "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+    const comp = el => {
+      const fk = Object.keys(el).find(k => k.startsWith("__reactFiber"));
+      for (let f = fk && el[fk], k = 0; f && k < 40; k++, f = f.return)
+        if (f.stateNode && typeof f.stateNode.selectOption === "function") return f.stateNode;
+      return null;
+    };
+    document.addEventListener("agent-fill-combo", async e => {
+      const el = e.target, value = el.getAttribute("data-agent-fill") || "";
+      let inst = comp(el);
+      if (!inst) return el.setAttribute("data-agent-fill-result", "none");
+      if (inst.props.onInputChange) inst.props.onInputChange(value.split(",")[0], {action: "input-change", prevInputValue: ""});
+      const v = norm(value), first = v.split(" ")[0];
+      for (let t = 0; t < 12; t++) {  // options can load from the network
+        await new Promise(r => setTimeout(r, 250));
+        inst = comp(el);
+        const opts = inst.props.options || [];
+        const labels = opts.map(o => norm(String((inst.props.getOptionLabel ? inst.props.getOptionLabel(o) : o.label) || "")));
+        let i = labels.findIndex(l => l === v);
+        if (i < 0) i = labels.findIndex(l => l && (v.startsWith(l + " ") || l.startsWith(v + " ")));
+        if (i < 0) i = labels.findIndex(l => first && l.startsWith(first));
+        if (i >= 0) { inst.selectOption(opts[i]); return el.setAttribute("data-agent-fill-result", "ok"); }
+      }
+      el.setAttribute("data-agent-fill-result", "no");
+    }, true);
+  }
+
+  function injectHelper() {
+    if (document.documentElement.hasAttribute("data-agent-helper")) return;
+    const s = document.createElement("script");
+    s.textContent = "(" + pageHelper.toString() + ")();";
+    document.documentElement.append(s);  // blocked on sites whose policy forbids inline scripts
+    s.remove();
+  }
+
+  async function fillCombo(el, value) {
+    injectHelper();
+    if (document.documentElement.hasAttribute("data-agent-helper")) {
+      el.removeAttribute("data-agent-fill-result");
+      el.setAttribute("data-agent-fill", value);
+      el.dispatchEvent(new CustomEvent("agent-fill-combo", {bubbles: true}));
+      for (let t = 0; t < 20; t++) {
+        await sleep(250);
+        const r = el.getAttribute("data-agent-fill-result");
+        if (r === "ok") return true;
+        if (r === "no") return false;
+        if (r === "none") break;  // not a react-select box: type into it instead
+      }
+    }
+    el.focus();
+    setValue(el, value);
+    for (let t = 0; t < 12; t++) {
+      await sleep(250);
+      // only this box's own list: the page can have others, like the phone country list
+      const list = document.getElementById(el.getAttribute("aria-controls") || el.getAttribute("aria-owns") || "");
+      const opts = list ? [...list.querySelectorAll("[role=option]")] : [];
+      const i = pickLoose(opts.map(o => o.innerText), value);
+      if (i >= 0) {
+        for (const ev of ["mousedown", "mouseup", "click"]) opts[i].dispatchEvent(new MouseEvent(ev, {bubbles: true}));
+        return true;
+      }
+    }
+    el.blur();
+    return false;
+  }
+
+  async function put(el, f, v) {
+    if (f.type === "radio") { const i = pick(f.options, v); if (i < 0) return false; el[i].click(); return true; }
+    if (f.type === "select") { const i = pick(f.options, v); if (i < 0) return false; setValue(el, el.options[i].value); return true; }
+    if (f.type === "combobox") return fillCombo(el, v);
+    if (!el.value || !el.value.trim()) setValue(el, v);  // never overwrite what's there
+    return true;
+  }
+
+  function mark(el, state) {
+    // outline what's visible: the question around radios, the box around dropdowns and uploads
+    const target = Array.isArray(el) ? (el[0].closest("fieldset, [role=radiogroup], li") || el[0].parentElement)
+      : el.getAttribute("role") === "combobox" ? (el.closest("[class*=control]") || el)
+      : el.type === "file" ? (el.closest("[class*=upload], [class*=Upload]") || el.parentElement) : el;
+    if (!target || !target.style) return;
+    target.style.outline = "3px solid " + COLORS[state];
+    target.style.outlineOffset = "2px";
+  }
+
+  async function attachResume(el, name) {
+    const {data} = await api("GET", "/api/jobs/resume");
+    const bytes = Uint8Array.from(atob(data), c => c.charCodeAt(0));
+    const dt = new DataTransfer();
+    dt.items.add(new File([bytes], name, {type: "application/pdf"}));
+    el.files = dt.files;
+    el.dispatchEvent(new Event("input", {bubbles: true}));
+    el.dispatchEvent(new Event("change", {bubbles: true}));
+  }
+
+  // ---------- floating panel ----------
+
+  let box, body;
+  function node(tag, text, style) {
+    const e = document.createElement(tag);
+    if (text !== undefined) e.textContent = text;
+    if (style) e.style.cssText = style;
+    return e;
+  }
+  const BTN = "font:600 14px -apple-system,system-ui,sans-serif;border:0;border-radius:8px;padding:9px 12px;cursor:pointer;";
+  function ui() {
+    box = node("div", undefined, "position:fixed;right:12px;bottom:12px;z-index:2147483647;max-width:340px;max-height:70vh;overflow:auto;background:#1f1e1c;color:#ebeae4;border-radius:12px;padding:10px;font:14px/1.4 -apple-system,system-ui,sans-serif;box-shadow:0 6px 24px rgba(0,0,0,.35)");
+    const go = node("button", "Fill from agent", BTN + "background:#57a37a;color:#fff;width:100%");
+    go.onclick = () => { go.disabled = true; run().finally(() => { go.disabled = false; go.textContent = "Fill again"; }); };
+    body = node("div");
+    box.append(go, body);
+    document.body.append(box);
+  }
+  function say(text) { body.replaceChildren(node("div", text, "margin-top:8px")); }
+
+  async function run() {
+    say("Reading the form...");
+    const {fields, els} = collect();
+    if (!fields.length) return say("No form fields on this page.");
+    let res;
+    try { res = await api("POST", "/api/jobs/fill", {url: location.href, fields}); }
+    catch (e) { return say(e.message); }
+    const todo = [], counts = {filled: 0, review: 0, you: 0};
+    // the resume first: some forms fill fields from it and would overwrite ours
+    for (const a of res.answers) {
+      if (a.kind !== "file" || fields[a.i].type !== "file") continue;
+      try { await attachResume(els[a.i], res.resume_name); mark(els[a.i], "filled"); counts.filled++; }
+      catch (e) { todo.push([fields[a.i].label, "Resume: " + e.message]); mark(els[a.i], "you"); counts.you++; }
+      await sleep(1500);
+    }
+    for (const a of res.answers) {
+      const el = els[a.i], f = fields[a.i];
+      if (a.kind === "file" && f.type === "file") continue;
+      let state = "you";
+      if (a.value && f.type !== "file") {
+        if (await put(el, f, a.value)) state = a.kind === "draft" ? "review" : "filled";
+        else todo.push([f.label, "Couldn't choose an option for: " + a.value]);
+      } else if (a.value) {
+        todo.push([f.label, "Upload this as a file or paste it: ", a.value]);
+      } else if (f.label) {
+        todo.push([f.label, KIND[a.kind] || "Answer yourself"]);
+      }
+      mark(el, state);
+      counts[state]++;
+    }
+    const out = [node("div", (res.job ? res.job.company + ": " + res.job.title : "Not a job from the agent; filled from your profile.") , "margin-top:8px;font-weight:600"),
+                 node("div", counts.filled + " filled (green), " + counts.review + " drafts to review (blue), " + counts.you + " for you (orange). Check everything, solve the CAPTCHA and submit yourself.", "margin-top:4px")];
+    for (const [q, what, text] of todo) {
+      const row = node("div", undefined, "margin-top:8px;border-top:1px solid #33322e;padding-top:6px");
+      row.append(node("div", q, "font-weight:600"), node("div", what, "color:#9b9992"));
+      if (text) {
+        const copy = node("button", "Copy text", BTN + "background:#33322e;color:#ebeae4;margin-top:4px");
+        copy.onclick = () => navigator.clipboard.writeText(text).then(() => { copy.textContent = "Copied"; });
+        row.append(copy);
+      }
+      out.push(row);
+    }
+    if (res.job) {
+      const done = node("button", "Mark applied in the panel", BTN + "background:#2f6fd6;color:#fff;margin-top:10px;width:100%");
+      done.onclick = () => api("POST", "/api/jobs/status", {id: res.job.id, status: "applied"})
+        .then(() => { done.textContent = "Marked applied"; done.disabled = true; }, e => { done.textContent = e.message; });
+      out.push(done);
+    }
+    body.replaceChildren(...out);
+  }
+
+  // Application forms often render after load; wait for one before showing the button.
+  let tries = 0;
+  const timer = setInterval(() => {
+    if (++tries > 40) return clearInterval(timer);
+    if (document.querySelector("input[type=email], input[name*=email i], input[type=file]")) {
+      clearInterval(timer);
+      ui();
+    }
+  }, 500);
+  window.__agentFill = {collect, put, mark, attachResume, run};  // for testing from the console
+})();
 """

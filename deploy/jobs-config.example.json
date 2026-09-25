@@ -29,7 +29,9 @@
   "intern",
   "internship",
   "iii",
-  "iv"
+  "iv",
+  "3",
+  "4"
  ],
  "max_years": 4,
  "exclude_no_sponsorship": false,
@@ -104,32 +106,5 @@
  "max_drafts_per_run": 15,
  "draft_model": "qwen3:8b",
  "good_score": 60,
- "strong_score": 75,
- "skills": [
-  "Java",
-  "Python",
-  "JavaScript",
-  "TypeScript",
-  "C++",
-  "REST",
-  "microservices",
-  "Node.js",
-  "React",
-  "Next.js",
-  "Flask",
-  "Spring",
-  "Spring Boot",
-  "Angular",
-  "AWS",
-  "GCP",
-  "Google Cloud",
-  "Docker",
-  "Kubernetes",
-  "CI/CD",
-  "MongoDB",
-  "MySQL",
-  "SQL",
-  "Git",
-  "Agile"
- ]
+ "strong_score": 72
 }
