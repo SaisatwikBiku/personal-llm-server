@@ -56,6 +56,8 @@ Several design choices come straight from the benchmarks. The system prompt is s
 
 `toolrunner.py` is a short helper that executes one tool as the unprivileged `agent` user. The server calls it through sudo, which is the core of the security model.
 
+`jobs.py` is a job search that runs overnight inside the panel process. It reads the public job board APIs of Greenhouse, Lever and Ashby for a list of companies, finds more companies through site-restricted SearXNG searches, and drops postings whose title, location, required years or citizenship and clearance requirements don't fit. The 4B model scores each remaining posting against my resume in about 27 seconds, with the resume at the start of the prompt so Ollama's cache covers it. For the strongest matches, the 8B model drafts answers to the form's open questions (the 4B invented project details in testing; the 8B stuck to the resume). Factual answers such as name, contact details and work authorization come from a profile file, never from the model. A push notification each morning lists the new matches, and a Jobs view in the panel shows each one with its score, the prepared answers with copy buttons, and a link to the posting. It never submits an application: the Greenhouse and Lever application forms are behind reCAPTCHA and hCaptcha, and forms include legal agreements that I should read myself.
+
 The panel listens only on `127.0.0.1:8000`. `tailscale serve` publishes it over HTTPS to devices signed into my tailnet and nowhere else.
 
 ## Security model
@@ -78,12 +80,15 @@ Web search needs approval too, even though it only reads. A search query leaves 
 
 Every action, approved or not, is appended to `/home/agentd/actions.jsonl`, which logrotate keeps for 12 weeks.
 
+The job search is the one part that reaches the network without an approval. It is plain code, not the tool loop: it only sends GET requests to URLs it builds itself, to the three job board APIs and the local SearXNG, from the company names and search phrases in its config. From search results it keeps only the company name, and only when the result's URL matches one of the three job board hosts. Model output never becomes a URL or request data, and my resume and profile never leave the machine. They live in `/home/agentd/jobs`, which the `agent` user can't read.
+
 ## Repository layout
 
 ```
 agent.py              prompt, tools, model call, terminal loop
 server.py             web control panel, approval flow, push notifications
 toolrunner.py         runs one tool as the agent user
+jobs.py               nightly job search, scoring and application drafts
 requirements.txt
 deploy/
   agent-web.service           systemd unit for the panel (runs as agentd)
@@ -96,6 +101,8 @@ deploy/
   agent-update.sh             pulls main from GitHub and deploys it
   agent-update.service        runs the deploy script
   agent-update.timer          triggers it every 5 minutes
+  jobs-config.example.json    job search settings: roles, companies, filters, schedule
+  jobs-profile.example.json   fields for application forms (the real file stays on the server)
 ```
 
 ## Setup
@@ -194,7 +201,7 @@ When `main` has a commit that isn't deployed yet, the script:
 5. Copies the files into `/opt/agent` and restarts the panel.
 6. Waits up to 20 seconds for the panel to answer. If it doesn't, the script restores the backup, restarts again, and marks the commit as bad so it isn't retried. The next commit to `main` is tried normally.
 
-Only `agent.py`, `server.py`, `toolrunner.py` and `requirements.txt` are deployed automatically. Files under `deploy/` change root-level configuration (sudo rules, systemd units, firewall), so the script only reports that they changed. Apply those by hand after reviewing them.
+Only `agent.py`, `server.py`, `toolrunner.py`, `jobs.py` and `requirements.txt` are deployed automatically. Files under `deploy/` change root-level configuration (sudo rules, systemd units, firewall), so the script only reports that they changed. Apply those by hand after reviewing them.
 
 Anyone who can push to `main` can change the code this machine runs, so the GitHub account needs two-factor authentication.
 
@@ -231,8 +238,23 @@ All settings are environment variables, set in the systemd unit or a drop-in fil
 | `AGENT_PUSH_SUBS` | `/home/agent/push_subscriptions.json` | Saved push subscriptions |
 | `AGENT_PUSH_SUB` | `mailto:agent@example.com` | Contact address sent to push services |
 | `AGENT_ALLOWED_LOGIN` | unset | If set, only this Tailscale login may use the panel |
+| `AGENT_JOBS_DIR` | `/home/agentd/jobs` | Job search config, profile, resume and results |
 
 Tools that run without approval are listed in `AUTO_APPROVE` in `agent.py`.
+
+## Job search setup
+
+The job search stays off until its folder has a config and a resume. As `sai` on the server, with `profile.json` and `resume.txt` copied into the home directory first:
+
+```bash
+sudo install -d -o agentd -g agentd -m 700 /home/agentd/jobs
+sudo install -o agentd -g agentd -m 600 /opt/agent-src/deploy/jobs-config.example.json /home/agentd/jobs/config.json
+sudo install -o agentd -g agentd -m 600 ~/profile.json ~/resume.txt /home/agentd/jobs/
+```
+
+Fill in `profile.json` from `deploy/jobs-profile.example.json`. An empty field makes the matching form question show up as one to answer yourself. Edit `config.json` to change roles, companies (board names as they appear in the job board URLs), the run and digest times, and the score thresholds; the next run picks up the change without a restart. The first run happens at the next `run_at` time, or right away from Run now in the Jobs view.
+
+Each run can score up to 200 postings (`max_scored_per_run`), about 90 minutes of model time, and the rest wait for the next night. Panel tasks take priority: the job search waits whenever a task is running.
 
 ## Running a laptop as a server
 

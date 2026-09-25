@@ -13,7 +13,7 @@ BRANCH=main
 STATE=/var/lib/agent-update
 BACKUPS=/opt/agent-backups
 PANEL=http://127.0.0.1:8000/api/state
-FILES=(agent.py server.py toolrunner.py requirements.txt)
+FILES=(agent.py server.py toolrunner.py jobs.py requirements.txt)
 
 mkdir -p "$STATE" "$BACKUPS"
 cd "$SRC"
@@ -56,7 +56,7 @@ git reset --quiet --hard "$TARGET"
 echo "Deploying ${TARGET:0:7}: $(git log -1 --format=%s)"
 
 # 1. Validate before touching the live copy.
-if ! "$DEST/venv/bin/python" -m py_compile agent.py server.py toolrunner.py; then
+if ! "$DEST/venv/bin/python" -m py_compile agent.py server.py toolrunner.py jobs.py; then
     echo "Syntax check failed; not deploying ${TARGET:0:7}."
     echo "$TARGET" > "$STATE/bad"
     exit 1

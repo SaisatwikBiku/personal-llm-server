@@ -6,7 +6,7 @@ Context for working on this repository. Read this before changing anything; the 
 
 A personal AI agent running entirely on a spare laptop at Sai's home. A local 4B model (Ollama) proposes one action at a time as JSON, Sai approves or denies it from a web panel on his iPhone, the action runs as an unprivileged user, and the result goes back to the model until it finishes. No cloud model or API key is involved. The laptop runs headless with the lid closed and is reached over Tailscale.
 
-Status as of 2026-09-25: all five build phases are done (base system and model, agent core, phone control panel, notifications and web search, hardening), and the server deploys itself from `main` on GitHub. The first automatic deploy (commit `1a9b055`) succeeded. A test deploy of a visible change (panel title "Agent v2") was the next planned step and may not have been done yet.
+Status as of 2026-09-25: all five build phases are done, and a job search (`jobs.py`, see below) was added the same day (base system and model, agent core, phone control panel, notifications and web search, hardening), and the server deploys itself from `main` on GitHub. The first automatic deploy (commit `1a9b055`) succeeded. A test deploy of a visible change (panel title "Agent v2") was the next planned step and may not have been done yet.
 
 ## The server
 
@@ -41,6 +41,7 @@ Network is Wi-Fi only, configured in `/etc/netplan/50-cloud-init.yaml`. cloud-in
 | `/home/agentd/push_subscriptions.json` | Saved push subscriptions for Sai's phone |
 | `/home/agent/actions.jsonl` | Log for the terminal version only |
 | `/opt/searxng/settings.yml` | SearXNG config (JSON output on, limiter off, contains a secret key) |
+| `/home/agentd/jobs/` | Job search: `config.json`, `profile.json` (Sai's contact details and form answers), `resume.txt`, `jobs.json` (results). Mode 700, files 600, owned by `agentd` |
 
 ### Services
 
@@ -108,19 +109,28 @@ What follows from these numbers, and should stay true:
 
 `toolrunner.py` reads `{"arg", "content"}` JSON on stdin, runs one tool from `agent.TOOLS`, prints the result.
 
+`jobs.py` is the job search. `server.py` starts `jobs_loop()`, which calls `jobs.tick()` every minute; `tick` runs the search once a day after `run_at` and pushes a digest after `digest_at` (times in `config.json`, America/New_York). It does nothing until `/home/agentd/jobs` has `config.json` and `resume.txt`.
+
+- Sources: Greenhouse (`boards-api.greenhouse.io`), Lever (`api.lever.co`) and Ashby (`api.ashbyhq.com`) public board APIs for the configured companies, plus boards discovered through `site:` searches in SearXNG (60 most recent kept in `meta.discovered`).
+- Filters before the model: title must contain a configured role and no excluded word (`norm_title` handles "Staff+", "fullstack", "backend"); US or remote location (`location_ok`, non-US checked before two-letter state codes); no citizenship, clearance or ITAR requirement; smallest "N+ years ... experience" at most `max_years`. Postings saying they don't sponsor are flagged, not dropped, unless `exclude_no_sponsorship` is set.
+- Scoring: `agent-4b`, resume in the system prompt (stable, so cached), posting clipped to 2,500 characters, JSON schema `{score, fit, gaps}`. About 27 s per posting on this machine; first call about 55 s. The fit and gaps sentences are sometimes wrong (it once said C++ and Kubernetes were missing), so the panel labels them as the model's view.
+- Drafts: `qwen3:8b` with thinking off (`draft_model`), about 33 s per answer plus about 100 s to swap models, then `restore_default_model()` loads `agent-4b` back. The 4B invented project details in cover letters; the 8B mostly stuck to the resume but still overstated once ("experience with observability systems"), so drafts are labeled for checking. Greenhouse publishes each job's form questions (`?questions=true`); `answer_for()` fills facts from `profile.json`, marks legal/policy and demographic questions for Sai, and drafts open questions. Lever and Ashby don't publish form questions, so those get the standard fields plus one "why this role" draft.
+- State: `jobs.json` holds scored jobs, `seen` (filtered-out IDs, pruned after 90 days) and `meta` (last run stats, digest times). All writes go through `update_db()` under `db_lock`. A restart mid-run loses nothing already saved; unscored postings are picked up by the next run.
+- It never submits applications. Greenhouse and Lever application forms use reCAPTCHA and hCaptcha (checked 2026-09-25), and Sai decided the agent should not work around them.
+
 Environment variables are listed in the README's configuration table.
 
 ## Security rules that must hold
 
 The model is assumed to be sometimes wrong and sometimes manipulated by text it reads. These properties are the point of the design; don't trade them for convenience without Sai explicitly deciding to.
 
-1. Any tool with side effects or outbound network access needs Sai's approval. `web_search` and `fetch_url` stay approval-gated because queries and URLs can carry data out.
+1. Any tool with side effects or outbound network access needs Sai's approval. `web_search` and `fetch_url` stay approval-gated because queries and URLs can carry data out. The one exception is `jobs.py`, which Sai approved on 2026-09-25: it sends unapproved GET requests, but only to URLs its own code builds (the three job board API hosts and the local SearXNG) from `config.json`. Model output must never become a URL, query or request body there, search results are reduced to a board name matched against the three hosts, and nothing from `profile.json` or `resume.txt` may be sent anywhere. Keep it that way, and never make it submit applications.
 2. Approval cards show the exact command, path and full content preview, not a model-written summary.
 3. The panel runs as `agentd`; tools run as `agent`. The sudo rule is exactly `agentd ALL=(agent) NOPASSWD: /opt/agent/venv/bin/python /opt/agent/toolrunner.py *`. Don't widen it.
 4. The `agent` user must not be able to reach the panel by any route or read `/home/agentd`. There are two routes: loopback port 8000, and `tailscale serve` on this machine's own tailnet address, which `tailscaled` forwards to port 8000 as root, so the port 8000 rule alone doesn't cover it. The firewall unit blocks both. Verify all three: `sudo -u agent curl -s -m 3 http://127.0.0.1:8000/api/state; echo $?` (expect 7), `sudo -u agent curl -s -m 5 -o /dev/null -w "%{http_code}\n" https://sai-ai.<tailnet>.ts.net/api/state` (expect 000), and `sudo -u agent ls /home/agentd` (expect permission denied). Before 2026-09-25 only the first rule existed and the second check returned 200.
 5. The panel binds to `127.0.0.1` only and is exposed solely through `tailscale serve` (tailnet only). Never bind to `0.0.0.0` and never use `tailscale funnel`.
 6. Code in `/opt/agent` stays root-owned so neither service user can change what runs.
-7. The deploy script applies only the four code files. Files under `deploy/` change root-level configuration and are applied by hand after review.
+7. The deploy script applies only the five code files (`agent.py`, `server.py`, `toolrunner.py`, `jobs.py`, `requirements.txt`). Files under `deploy/` change root-level configuration and are applied by hand after review.
 8. Nothing secret goes in the repo: no email address, tailnet domain, Wi-Fi details, keys or subscriptions. `.gitignore` covers `*.pem`, `push_subscriptions.json`, `*.jsonl`, `venv/`, `__pycache__/`.
 
 ## Deploying changes
@@ -128,9 +138,9 @@ The model is assumed to be sometimes wrong and sometimes manipulated by text it 
 Push to `main`. Within about 5 minutes `agent-update.timer` runs the deploy script, which:
 
 1. Exits if `main` equals the deployed commit or the recorded bad commit.
-2. Records the commit and exits without a restart if none of the four code files changed (README-only or `deploy/`-only commits), noting `deploy/` changes in the log.
+2. Records the commit and exits without a restart if none of the five code files changed (README-only or `deploy/`-only commits), noting `deploy/` changes in the log.
 3. Postpones if the panel reports a task in progress.
-4. Resets `/opt/agent-src` to the commit, runs `py_compile` on the three Python files, backs up the live files, runs `pip install -r requirements.txt` if it differs from the live copy, installs the files as root, restarts `agent-web`.
+4. Resets `/opt/agent-src` to the commit, runs `py_compile` on the four Python files, backs up the live files, runs `pip install -r requirements.txt` if it differs from the live copy, installs the files as root, restarts `agent-web`.
 5. Polls `/api/state` for up to 20 seconds. On failure it restores the backup, restarts, and writes the commit to `bad`.
 
 Useful commands on the server: `sudo systemctl start agent-update` (deploy now), `journalctl -u agent-update -n 20 --no-pager` (history), `systemctl list-timers agent-update.timer`.
@@ -143,7 +153,7 @@ The repo is public, so the server clones over HTTPS without credentials. If it's
 
 `ssh sai@sai-ai` works without a password from Sai's Mac, so read-only checks are fine to run directly (`systemctl status`, `journalctl`, `ollama ps`, `free -m`, `sensors`, reading files). `sudo` asks for Sai's password, so anything needing root has to be handed to Sai as a command to run, with a one-line explanation of what it changes. Don't edit files in `/opt/agent` on the server; change the repo and let the deploy script ship it.
 
-Before pushing code: run `python3 -m py_compile agent.py server.py toolrunner.py`. There is no test suite yet. During the build, changes were checked with a stub `ollama` package (a `chat()` that returns scripted JSON actions) and FastAPI's `TestClient`, driving a task through pending approval, decision and finish. Adding that as `tests/` is on the backlog.
+Before pushing code: run `python3 -m py_compile agent.py server.py toolrunner.py jobs.py`. If a change adds a new file that `server.py` imports, push and install the updated `deploy/agent-update.sh` first; the installed script only ships the files in its own `FILES` list, so the panel would fail its health check and the commit would be marked bad. There is no test suite yet. During the build, changes were checked with a stub `ollama` package (a `chat()` that returns scripted JSON actions) and FastAPI's `TestClient`, driving a task through pending approval, decision and finish. Adding that as `tests/` is on the backlog.
 
 ## Hardware and OS quirks already solved
 
@@ -162,7 +172,7 @@ The 4B model gets simple sysadmin tasks right in 2 to 4 steps but makes confiden
 Roughly in priority order, as discussed with Sai:
 
 1. Memory across tasks: a short notes file the agent reads at task start (preferences, common paths), kept small for the prompt budget.
-2. Scheduled tasks from the panel (for example a daily disk and update check) with the result pushed to the phone.
+2. Scheduled tasks from the panel (for example a daily disk and update check) with the result pushed to the phone. `jobs_loop()` in `server.py` is a working pattern for this.
 3. An allowlist of harmless read-only commands (`df`, `free`, `uptime`, `ls`, `du`) that skip approval. Match exact commands, not prefixes, and reject anything with `;`, `|` to non-allowlisted programs, `>`, backticks or `$(`.
 4. A 4B/8B switch in the panel for harder tasks.
 5. A `tests/` folder using the stub-Ollama approach above.
