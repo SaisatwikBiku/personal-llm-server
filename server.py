@@ -77,14 +77,19 @@ def ensure_vapid_key():
 
 try:
     VAPID_PUBLIC = ensure_vapid_key()
-except OSError:
+    VAPID_ERROR = ""
+except OSError as e:
     VAPID_PUBLIC = ""
+    VAPID_ERROR = f"Push notifications are off: can't read or create {VAPID_FILE} ({e.strerror})."
 
 
 def load_subs():
     try:
         return json.loads(SUBS_FILE.read_text())
-    except (OSError, ValueError):
+    except FileNotFoundError:
+        return []
+    except (OSError, ValueError) as e:
+        print(f"Can't read {SUBS_FILE}: {e}", flush=True)
         return []
 
 
@@ -129,6 +134,21 @@ def add_event(kind, **data):
         state["seq"] += 1
         state["events"].append({"n": state["seq"], "kind": kind, "time": now(), **data})
         del state["events"][:-MAX_EVENTS]
+
+
+def startup_problems():
+    """Files the panel needs but can't use. These used to fail silently."""
+    problems = [VAPID_ERROR] if VAPID_ERROR else []
+    for path in (core.LOG_FILE, SUBS_FILE):
+        target = path if path.exists() else path.parent
+        if not os.access(target, os.W_OK):
+            problems.append(f"Can't write {path}. Check that it belongs to the user running the panel.")
+    return problems
+
+
+for problem in startup_problems():  # shown in the journal and at the top of the panel log
+    print(problem, flush=True)
+    add_event("error", text=problem)
 
 
 def set_status(status, pending=None):

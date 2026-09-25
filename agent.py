@@ -9,6 +9,7 @@ import json
 import os
 import re
 import subprocess
+import sys
 import time
 import urllib.parse
 import urllib.request
@@ -84,13 +85,19 @@ def resolve(path):
     return p if p.is_absolute() else WORKSPACE / p
 
 
+_log_failed = False
+
+
 def log(event):
+    global _log_failed
     event["time"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
     try:
         with LOG_FILE.open("a") as f:
             f.write(json.dumps(event) + "\n")
-    except OSError:
-        pass
+    except OSError as e:
+        if not _log_failed:  # report once per process, then keep the agent running
+            _log_failed = True
+            print(f"Can't write the action log {LOG_FILE}: {e}", file=sys.stderr, flush=True)
 
 
 def indent(text, prefix="    ", max_lines=20):
