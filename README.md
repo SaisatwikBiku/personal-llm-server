@@ -93,6 +93,9 @@ deploy/
   ollama-override.conf        Ollama settings (keep model loaded, 8k context, one model)
   Modelfile.agent             builds the agent-4b model with 8 threads
   wifi-powersave-off.service  keeps the Intel Wi-Fi card responsive
+  agent-update.sh             pulls main from GitHub and deploys it
+  agent-update.service        runs the deploy script
+  agent-update.timer          triggers it every 5 minutes
 ```
 
 ## Setup
@@ -177,6 +180,40 @@ The terminal version still works for testing at the keyboard. It runs everything
 ```bash
 sudo -u agent -H /opt/agent/venv/bin/python /opt/agent/agent.py
 ```
+
+## Updating from GitHub
+
+The server deploys itself from the `main` branch of this repository. A systemd timer on the laptop runs `deploy/agent-update.sh` every 5 minutes. Nothing on GitHub connects to the laptop; the laptop pulls, so no inbound access or deploy secrets are involved.
+
+When `main` has a commit that isn't deployed yet, the script:
+
+1. Postpones the deploy if the agent is in the middle of a task, and tries again on the next run.
+2. Checks the Python files for syntax errors and refuses to deploy if any fail.
+3. Backs up the live files to `/opt/agent-backups` (the 10 newest are kept).
+4. Runs `pip install` if `requirements.txt` changed.
+5. Copies the files into `/opt/agent` and restarts the panel.
+6. Waits up to 20 seconds for the panel to answer. If it doesn't, the script restores the backup, restarts again, and marks the commit as bad so it isn't retried. The next commit to `main` is tried normally.
+
+Only `agent.py`, `server.py`, `toolrunner.py` and `requirements.txt` are deployed automatically. Files under `deploy/` change root-level configuration (sudo rules, systemd units, firewall), so the script only reports that they changed. Apply those by hand after reviewing them.
+
+Anyone who can push to `main` can change the code this machine runs, so the GitHub account needs two-factor authentication.
+
+One-time setup on the server:
+
+```bash
+sudo git clone https://github.com/SaisatwikBiku/personal-llm-server.git /opt/agent-src
+sudo install -m 755 /opt/agent-src/deploy/agent-update.sh /usr/local/sbin/agent-update
+sudo cp /opt/agent-src/deploy/agent-update.service /opt/agent-src/deploy/agent-update.timer /etc/systemd/system/
+sudo chown -R root:root /opt/agent
+sudo systemctl daemon-reload
+sudo systemctl enable --now agent-update.timer
+sudo systemctl start agent-update
+journalctl -u agent-update -n 20 --no-pager
+```
+
+After this, `/opt/agent` belongs to root and changes go through Git. To deploy right away instead of waiting for the timer, run `sudo systemctl start agent-update`. Deploy history is in `journalctl -u agent-update`.
+
+To roll back by hand, copy a folder from `/opt/agent-backups` into `/opt/agent` and restart `agent-web`, or push a revert commit.
 
 ## Configuration
 
