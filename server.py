@@ -804,6 +804,16 @@ def jobs_docs_save(body: DocsIn, request: Request):
     return {"ok": True}
 
 
+@app.post("/api/jobs/ready")
+def jobs_ready(request: Request):
+    """Fill in answers, resumes and cover letters for the review list now."""
+    check_user(request)
+    if jobs.progress["running"]:
+        raise HTTPException(409, "A job search is already running")
+    threading.Thread(target=jobs.run_get_ready, args=(panel_busy,), daemon=True).start()
+    return {"ok": True}
+
+
 @app.post("/api/jobs/stop")
 def jobs_stop(request: Request):
     """End the running search at its next step; what's saved so far stays."""
@@ -1901,7 +1911,7 @@ async function loadJobs(force){
   }
   updateApply(c.approved || 0);
   const list = listJobs();
-  const sig = jfilter + JSON.stringify(list.map(j => [j.id, j.status, j.prepared, j.score]));
+  const sig = jfilter + s.not_ready + s.progress.running + JSON.stringify(list.map(j => [j.id, j.status, j.prepared, j.docs, j.score]));
   if (sig !== listSig || force) { listSig = sig; renderList(list, s); }
   if (!s.configured) $("jdetail").replaceChildren(emptyState("jobs", "Job search isn't set up", "Put config.json and resume.txt in the jobs folder on the server."));
   else if (!jsel && !document.querySelector("#jdetail .jd")) $("jdetail").replaceChildren(emptyState("jobs", list.length ? "Pick a job" : "Nothing here", list.length ? "Its answers, the posting and the actions open here." : (jfilter === "review" ? "New applications are prepared overnight." : "No jobs with this status.")));
@@ -1910,7 +1920,21 @@ function emptyState(ic, title, text){ const e = el("div", "empty"); e.append(ico
 function setFilter(k){ jfilter = k; store("jfilter", k); jsel = null; listSig = ""; $("jdetail").replaceChildren(); $("v-jobs").classList.remove("detail"); loadJobs(true); }
 function renderList(list, s){
   const box = $("jlist"); box.replaceChildren();
-  if (jfilter === "review" && list.length) box.append(el("div", "muted small", "Check each one, fill what's missing, tick the statements you agree to, approve. Approved ones are submitted from Apply to approved."));
+  if (jfilter === "review" && s.not_ready) {
+    const c = el("div", "card"); c.style.cssText = "padding:12px 14px;margin-bottom:4px";
+    const t = el("div", "small");
+    t.append(el("b", null, s.not_ready + (s.not_ready === 1 ? " more match is" : " more matches are") + " getting ready. "),
+             document.createTextNode("They join this list once their answers, resume and cover letter are written, about 4 minutes each. The nightly run does this before your morning alert."));
+    c.append(t);
+    if (!s.progress.running) {
+      const b = el("button", "btn ghost sm"); b.append(icon("sparkle"), el("span", null, "Get them ready now"));
+      b.style.marginTop = "10px";
+      b.onclick = () => send("api/jobs/ready", "POST").then(() => { toast("Getting them ready. The Stop button ends it."); listSig = ""; setTimeout(() => loadJobs(true), 600); }, e => toast(e.message, true));
+      c.append(b);
+    }
+    box.append(c);
+  }
+  if (jfilter === "review" && list.length) box.append(el("div", "muted small", "Each one has its answers, tailored resume and cover letter. Check them, fill what's missing, tick the statements you agree to, approve. Approved ones are submitted from Apply to approved."));
   if (!list.length) box.append(emptyState(jfilter === "review" ? "check" : "jobs", jfilter === "review" ? "All caught up" : "Nothing here", jfilter === "review" ? "New applications are prepared overnight." : "No jobs with this status yet."));
   for (const j of list) {
     const r = el("button", "jrow" + (j.id === jsel ? " on" : ""));

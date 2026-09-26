@@ -1015,17 +1015,24 @@ def _run(is_busy):
                 db["jobs"][jid].update(r, scored=stamp())
         update_db(save_score)
 
-    # 3. Prepare answers for the best new matches.
+    # 3. Get the review list ready: answers, resume and cover letter for the best
+    # matches, before the morning digest.
+    deadline = prep_deadline(cfg)
+    stats["readied"] = get_ready(is_busy, cfg, profile, resume, deadline)
+
+    # 4. Answers for more matches, including boards the autofill can't submit on.
     with db_lock:
         db = load_db()
-        # boards the autofill can submit on come first, so the review list fills up
         strong = sorted((j for j in db["jobs"].values()
                          if j["status"] == "new" and j.get("answers") is None
                          and (j.get("score") or 0) >= cfg["good_score"]),
-                        key=lambda j: (not auto_apply_ok(j), -j["score"]))[:cfg["max_drafts_per_run"]]
+                        key=lambda j: (not auto_apply_ok(j), -j["score"]))
+        strong = strong[:max(0, cfg["max_drafts_per_run"] - stats["readied"])]
     resume_data = load_resume() if cfg["tailor_docs"] else None
     try:
         for i, job in enumerate(strong, 1):
+            if deadline and today(cfg) >= deadline:
+                break
             set_progress(f"preparing {job['company']}: {job['title']}", i, len(strong))
             answers, note = prepare(job, profile, resume, is_busy, cfg["draft_model"])
             docs = tailor(job, resume_data, is_busy, cfg["draft_model"]) if resume_data and auto_apply_ok(job) else None
@@ -1044,6 +1051,84 @@ def _run(is_busy):
     stats["finished"] = stamp()
     update_db(lambda db: db["meta"].update(last_run=stats))
     return stats
+
+
+def prep_deadline(cfg):
+    """Stop preparing a few minutes before the morning digest, so the review list is
+    settled when Sai opens it. A run started after the digest time has no deadline."""
+    now = today(cfg)
+    h, m = map(int, cfg["digest_at"].split(":"))
+    digest = now.replace(hour=h, minute=m, second=0, microsecond=0)
+    return digest - timedelta(minutes=10) if now < digest else None
+
+
+def docs_needed(cfg):
+    return bool(cfg["tailor_docs"]) and RESUME_JSON.exists()
+
+
+def ready(job, cfg):
+    """Complete for review: prepared answers, and the documents when they're made."""
+    return job.get("answers") is not None and (bool(job.get("docs")) or not docs_needed(cfg))
+
+
+def queue_candidates(db, cfg):
+    """The jobs that belong in the review list, best first, ready or not."""
+    jobs = [j for j in db["jobs"].values()
+            if j["status"] == "new" and auto_apply_ok(j) and (j.get("score") or 0) >= cfg["good_score"]]
+    jobs.sort(key=lambda j: -(j.get("score") or 0))
+    return jobs[:cfg["queue_size"]]
+
+
+def get_ready(is_busy, cfg, profile, resume, deadline=None):
+    """Fill in what the best review candidates are missing: answers, the tailored resume
+    and the cover letter. Returns how many jobs it worked on."""
+    with db_lock:
+        todo = [j for j in queue_candidates(load_db(), cfg) if not ready(j, cfg)]
+    r = load_resume() if docs_needed(cfg) else None
+    done = 0
+    try:
+        for i, job in enumerate(todo, 1):
+            if deadline and today(cfg) >= deadline:
+                break
+            set_progress(f"getting ready for review: {job['company']}, {job['title']}", i, len(todo))
+            update = {}
+            try:
+                if job.get("answers") is None:
+                    update["answers"], update["note"] = prepare(job, profile, resume, is_busy, cfg["draft_model"])
+                if r and not job.get("docs"):
+                    update["docs"] = tailor(job, r, is_busy, cfg["draft_model"])
+            except Stopped:
+                raise
+            except Exception as e:  # one bad job shouldn't hold up the rest of the list
+                print(f"get_ready: {job['id']}: {e}", flush=True)
+                if not update:
+                    continue
+
+            def save(db, jid=job["id"], u=update):
+                if jid in db["jobs"]:
+                    db["jobs"][jid].update(u)
+            update_db(save)
+            done += 1
+    finally:
+        if done and cfg["draft_model"] != core.MODEL:
+            restore_default_model()
+    return done
+
+
+def run_get_ready(is_busy=lambda: False):
+    """The panel's "Get them ready" button: step 3 of the run on its own."""
+    if not run_lock.acquire(blocking=False):
+        return {"error": "A job search is already running."}
+    progress.update(running=True, step="starting", done=0, total=0, stop=False)
+    try:
+        cfg = load_config()
+        resume = (JOBS_DIR / "resume.txt").read_text().strip()
+        return {"readied": get_ready(is_busy, cfg, load_json(JOBS_DIR / "profile.json", {}), resume)}
+    except Stopped:
+        return {"stopped": True}
+    finally:
+        progress.update(running=False, step="", stop=False)
+        run_lock.release()
 
 
 def filter_reason(job, cfg):
@@ -1137,6 +1222,7 @@ def summary():
                         if j.get("score_version") != SCORE_VERSION and j["status"] == "new"),
         "jobs": jobs,
         "review": [j["id"] for j in review_queue(db, cfg)],
+        "not_ready": sum(1 for j in queue_candidates(db, cfg) if not ready(j, cfg)),
         "approved": sum(1 for j in db["jobs"].values() if j["status"] == "approved"),
     }
 
@@ -1587,8 +1673,10 @@ def needs_answer(a):
 
 
 def review_queue(db, cfg):
+    """The review list: complete applications only (answers, and the resume and cover
+    letter when those are made), best first."""
     jobs = [j for j in db["jobs"].values()
-            if j["status"] == "new" and j.get("answers") is not None and auto_apply_ok(j)
+            if j["status"] == "new" and auto_apply_ok(j) and ready(j, cfg)
             and (j.get("score") or 0) >= cfg["good_score"]]
     jobs.sort(key=lambda j: -(j.get("score") or 0))
     return jobs[:cfg["queue_size"]]
