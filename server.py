@@ -5,9 +5,11 @@ Reuses the prompt, model call and tools from agent.py (same folder).
 Runs from /opt/agent as the agentd user (see deploy/agent-web.service); tools run
 as the agent user through toolrunner.py when AGENT_USE_TOOLRUNNER=1.
 """
+import asyncio
 import base64
 import json
 import os
+import queue
 import re
 import subprocess
 import threading
@@ -19,9 +21,11 @@ from pathlib import Path
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import HTMLResponse, Response
+from fastapi.responses import HTMLResponse, Response, StreamingResponse
 from pydantic import BaseModel
 from pywebpush import WebPushException, webpush
+
+import ollama
 
 import agent as core
 import jobs
@@ -39,6 +43,16 @@ push_lock = threading.Lock()
 USE_TOOLRUNNER = os.environ.get("AGENT_USE_TOOLRUNNER") == "1"
 TOOLRUNNER = ["sudo", "-n", "-u", "agent", "-H",
               "/opt/agent/venv/bin/python", "/opt/agent/toolrunner.py"]
+
+# Chat mode and memory (plain conversation, no tools; see "chat and memory" below)
+CHAT_FILE = Path(os.environ.get("AGENT_CHATS", "/home/agentd/chats.json"))
+MEMORY_FILE = Path(os.environ.get("AGENT_MEMORY", "/home/agentd/memory.md"))
+CHAT_MODELS = {"better": os.environ.get("AGENT_CHAT_MODEL", "qwen3:8b"), "faster": core.MODEL}
+CHAT_HISTORY_CHARS = 12_000  # about 3,000 tokens: the 8B rereads 17 tokens/s when its cache is lost
+CHAT_MAX_CHATS = 50
+MEMORY_MAX_CHARS = 2_000
+chat_lock = threading.Lock()
+chat_active = threading.Semaphore(1)  # one reply at a time; the CPU can't do two
 
 app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
 lock = threading.Lock()
@@ -140,7 +154,7 @@ def add_event(kind, **data):
 def startup_problems():
     """Files the panel needs but can't use. These used to fail silently."""
     problems = [VAPID_ERROR] if VAPID_ERROR else []
-    for path in (core.LOG_FILE, SUBS_FILE):
+    for path in (core.LOG_FILE, SUBS_FILE, CHAT_FILE, MEMORY_FILE):
         target = path if path.exists() else path.parent
         if not os.access(target, os.W_OK):
             problems.append(f"Can't write {path}. Check that it belongs to the user running the panel.")
@@ -193,7 +207,7 @@ def wait_for_decision(action):
 
 
 def run_task(task):
-    system = {"role": "system", "content": core.SYSTEM_PROMPT}
+    system = {"role": "system", "content": core.SYSTEM_PROMPT + memory_block()}
     task_msg = {"role": "user", "content": f"Task: {task}"}
     history = []
     core.log({"event": "task", "task": task, "via": "web"})
@@ -249,10 +263,138 @@ def run_task(task):
         set_status("idle")
 
 
+# ---------- chat and memory ----------
+#
+# Chat is plain conversation with no tools and no network access, so it needs no
+# approvals. Memory is a short list of facts about Sai, one per line, added to the
+# start of every chat and task. It's kept short because every character is read
+# by the model on each uncached request.
+
+CHAT_PROMPT = """You are a helpful assistant for Sai, running privately on his own computer.
+- Answer clearly and directly. Lead with the answer, then the details that matter.
+- Use short paragraphs. Use a list only when the content is a real list or steps.
+- If you are not sure of a fact, say so. Never invent sources, numbers or quotes.
+- You have no internet access and no tools here, and your knowledge stops at your training date. For anything current, say you can't check it.
+- For code, give complete, working snippets.""".replace("Sai", core.OWNER)
+
+REMEMBER_RE = re.compile(r"^\s*remember(?:\s+that)?\s*[:,]?\s+(.+)$", re.I | re.S)
+
+
+def load_memory():
+    try:
+        return MEMORY_FILE.read_text().strip()
+    except OSError:
+        return ""
+
+
+def save_memory(text):
+    MEMORY_FILE.write_text(text.strip() + "\n" if text.strip() else "")
+    MEMORY_FILE.chmod(0o600)
+
+
+def memory_block():
+    mem = load_memory()
+    return f"\n\nWhat you know about {core.OWNER} (from memory; use it when relevant):\n{mem}" if mem else ""
+
+
+def load_chats():
+    try:
+        return json.loads(CHAT_FILE.read_text())
+    except (OSError, ValueError):
+        return {}
+
+
+def save_chats(chats):
+    keep = sorted(chats, key=lambda k: chats[k]["updated"], reverse=True)[:CHAT_MAX_CHATS]
+    tmp = CHAT_FILE.with_suffix(".tmp")
+    tmp.write_text(json.dumps({k: chats[k] for k in keep}))
+    tmp.chmod(0o600)
+    os.replace(tmp, CHAT_FILE)
+
+
+def chat_messages(chat):
+    """System prompt, memory and date first (stable, so Ollama's cache covers them),
+    then as much recent conversation as fits the budget, oldest dropped first."""
+    today = datetime.now().strftime("%A, %B %d, %Y")
+    system = CHAT_PROMPT + memory_block() + f"\n\nToday is {today}."
+    kept, used = [], 0
+    for m in reversed(chat["messages"]):
+        used += len(m["content"])
+        if kept and used > CHAT_HISTORY_CHARS:
+            break
+        kept.append({"role": m["role"], "content": m["content"]})
+    return [{"role": "system", "content": system}] + kept[::-1]
+
+
+def write_reply(chat_id, model, out, stop):
+    """Run in a thread: stream the model's reply into the queue `out`, stop early when
+    `stop` is set, and save the reply (or the part written before a stop or error)."""
+    with chat_lock:
+        chat = load_chats()[chat_id]
+    messages = chat_messages(chat)
+    kw = {"think": False} if model.startswith("qwen3:") else {}  # see CLAUDE.md on qwen3 tags
+    parts, note = [], ""
+    with chat_active:
+        stream = None
+        try:
+            stream = ollama.chat(model=model, messages=messages, stream=True, keep_alive=-1,
+                                 options={"temperature": 0.6, "num_predict": 1024}, **kw)
+            for part in stream:
+                if stop.is_set():
+                    note = " (stopped)"
+                    break
+                text = part.message.content or ""
+                if text:
+                    parts.append(text)
+                    out.put(text)
+        except Exception as e:
+            note = f"\n\n(error: {e})"
+            out.put(note)
+        finally:
+            if stream is not None and hasattr(stream, "close"):
+                stream.close()  # closes the connection, which makes Ollama stop generating
+            with chat_lock:
+                chats = load_chats()
+                if chat_id in chats:
+                    chats[chat_id]["messages"].append({"role": "assistant", "content": "".join(parts) + note,
+                                                       "model": model, "time": now()})
+                    chats[chat_id]["updated"] = time.time()
+                    save_chats(chats)
+            out.put(None)
+
+
+async def stream_reply(chat_id, model, request):
+    """Pass the reply to the browser as it's written. The model runs in a thread; this
+    side checks for a closed connection (Stop, or the page closed) and tells the
+    thread to stop, so Ollama doesn't keep writing to nobody."""
+    out, stop = queue.Queue(), threading.Event()
+    threading.Thread(target=write_reply, args=(chat_id, model, out, stop), daemon=True).start()
+    try:
+        while True:
+            try:
+                item = out.get_nowait()
+            except queue.Empty:
+                if await request.is_disconnected():
+                    return
+                await asyncio.sleep(0.1)
+                continue
+            if item is None:
+                return
+            yield item
+    finally:
+        stop.set()
+
+
 # ---------- job search ----------
 
 def panel_busy():
-    return state["status"] != "idle"
+    """A task or a chat reply is using the model; the job search waits for both."""
+    if state["status"] != "idle":
+        return True
+    if chat_active.acquire(blocking=False):
+        chat_active.release()
+        return False
+    return True
 
 
 def jobs_loop():
@@ -430,6 +572,96 @@ def fill_script(request: Request):
     return Response(script, media_type="text/javascript", headers={"Cache-Control": "no-cache"})
 
 
+class ChatIn(BaseModel):
+    message: str
+    chat_id: str = ""
+    model: str = "better"
+
+
+@app.get("/api/chats")
+def chats_list(request: Request):
+    check_user(request)
+    with chat_lock:
+        chats = load_chats()
+    items = [{"id": k, "title": c["title"], "updated": c["updated"]} for k, c in chats.items()]
+    return sorted(items, key=lambda c: c["updated"], reverse=True)
+
+
+@app.get("/api/chats/{chat_id}")
+def chat_get(chat_id: str, request: Request):
+    check_user(request)
+    with chat_lock:
+        chat = load_chats().get(chat_id)
+    if not chat:
+        raise HTTPException(404, "No such chat")
+    return chat
+
+
+@app.delete("/api/chats/{chat_id}")
+def chat_delete(chat_id: str, request: Request):
+    check_user(request)
+    with chat_lock:
+        chats = load_chats()
+        chats.pop(chat_id, None)
+        save_chats(chats)
+    return {"ok": True}
+
+
+@app.post("/api/chat")
+def chat_send(body: ChatIn, request: Request):
+    """Add Sai's message and stream the reply as plain text. The chat id comes back
+    in the X-Chat-Id header, so the first message of a new chat can create it."""
+    check_user(request)
+    text = body.message.strip()
+    if not text:
+        raise HTTPException(400, "Empty message")
+    model = CHAT_MODELS.get(body.model, CHAT_MODELS["better"])
+    with chat_lock:
+        chats = load_chats()
+        chat_id = body.chat_id if body.chat_id in chats else uuid.uuid4().hex[:10]
+        chat = chats.setdefault(chat_id, {"title": text[:60], "created": time.time(), "messages": []})
+        chat["messages"].append({"role": "user", "content": text, "time": now()})
+        chat["updated"] = time.time()
+        remembered = REMEMBER_RE.match(text)
+        if remembered:  # "remember that ..." saves the fact itself; no model call
+            fact = " ".join(remembered.group(1).split())
+            mem = load_memory()
+            if len(mem) + len(fact) + 3 > MEMORY_MAX_CHARS:
+                reply = "Memory is full. Remove something in the Memory tab first."
+            else:
+                save_memory(f"{mem}\n- {fact}")
+                reply = f"Saved to memory: {fact}"
+            chat["messages"].append({"role": "assistant", "content": reply, "time": now()})
+        save_chats(chats)
+    headers = {"X-Chat-Id": chat_id, "Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
+    if remembered:
+        return Response(reply, media_type="text/plain; charset=utf-8", headers=headers)
+    if not chat_active.acquire(blocking=False):
+        raise HTTPException(409, "Another reply is still being written")
+    chat_active.release()
+    return StreamingResponse(stream_reply(chat_id, model, request), media_type="text/plain; charset=utf-8",
+                             headers=headers)
+
+
+class MemoryIn(BaseModel):
+    text: str
+
+
+@app.get("/api/memory")
+def memory_get(request: Request):
+    check_user(request)
+    return {"text": load_memory(), "max": MEMORY_MAX_CHARS}
+
+
+@app.put("/api/memory")
+def memory_put(body: MemoryIn, request: Request):
+    check_user(request)
+    if len(body.text) > MEMORY_MAX_CHARS:
+        raise HTTPException(400, f"Memory is limited to {MEMORY_MAX_CHARS} characters")
+    save_memory(body.text)
+    return {"ok": True}
+
+
 class SubscriptionIn(BaseModel):
     endpoint: str
     keys: dict
@@ -513,7 +745,7 @@ self.addEventListener("notificationclick", event => {
 });
 """
 
-PAGE = """<!doctype html>
+PAGE = r"""<!doctype html>
 <html lang="en"><head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
@@ -530,7 +762,21 @@ body{background:var(--bg);color:var(--fg);font:15px/1.45 -apple-system,system-ui
 header{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:10px 14px;border-bottom:1px solid var(--line)}
 header strong{font-size:16px}
 #status{font-size:13px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:55vw}
-#log{flex:1;overflow-y:auto;padding:12px 14px;-webkit-overflow-scrolling:touch}
+nav{display:flex;border-bottom:1px solid var(--line)}
+nav button{flex:1;background:transparent;color:var(--muted);border-radius:0;padding:9px 4px;font-size:14px;border-bottom:2px solid transparent}
+nav button.on{color:var(--fg);border-bottom-color:var(--accent);font-weight:600}
+.view{display:none;flex:1;overflow-y:auto;padding:12px 14px;-webkit-overflow-scrolling:touch}
+.view.on{display:block}
+#msgs{display:flex;flex-direction:column;gap:8px}
+.msg{white-space:pre-wrap;word-break:break-word;padding:8px 11px;border-radius:12px;max-width:92%}
+.msg.user{background:var(--accent);color:#fff;align-self:flex-end}
+.msg.assistant{background:var(--card);border:1px solid var(--line);align-self:flex-start}
+.msg.typing{color:var(--muted)}
+.msg.err{color:var(--deny)}
+.msg pre{margin:6px 0}
+.msg code{font:13px ui-monospace,Menlo,Consolas,monospace;background:var(--code);padding:1px 4px;border-radius:4px}
+.hint{color:var(--muted);font-size:13px}
+#memtext{font:14px/1.45 ui-monospace,Menlo,Consolas,monospace;color:var(--fg);background:var(--card);border:1px solid var(--line);border-radius:8px;padding:10px;width:100%;min-height:45vh;resize:vertical}
 .ev{margin:0 0 10px}
 .task{font-weight:600;margin-top:14px}
 .thought{color:var(--muted);font-size:13px}
@@ -549,7 +795,6 @@ button{font:inherit;border:0;border-radius:8px;padding:11px 14px;cursor:pointer}
 footer{display:flex;gap:8px;padding:10px 14px calc(10px + env(safe-area-inset-bottom,0px));border-top:1px solid var(--line)}
 input{font:inherit;font-size:16px;color:var(--fg);background:var(--card);border:1px solid var(--line);border-radius:8px;padding:10px;width:100%}
 #send{background:var(--accent);color:#fff}
-#jobs{display:none;flex:1;overflow-y:auto;padding:12px 14px;-webkit-overflow-scrolling:touch}
 .jbar{display:flex;gap:8px;align-items:center;margin-bottom:10px}
 .jbar a.ghost{text-decoration:none;border-radius:8px;margin-left:auto}
 .jbar select{font:inherit;font-size:13px;color:var(--fg);background:var(--card);border:1px solid var(--line);border-radius:8px;padding:5px 6px}
@@ -573,10 +818,27 @@ input{font:inherit;font-size:16px;color:var(--fg);background:var(--card);border:
 <header>
   <strong>Agent</strong>
   <span id="status">connecting</span>
-  <span><button class="ghost" id="jobsbtn">Jobs</button> <button class="ghost" id="alerts" style="display:none">Alerts</button> <button class="ghost" id="clear">Clear</button> <button class="ghost" id="stop">Stop</button></span>
+  <span><button class="ghost" id="alerts" style="display:none">Alerts</button></span>
 </header>
-<div id="log"></div>
-<div id="jobs">
+<nav id="tabs"><button data-view="chat">Chat</button><button data-view="log">Tasks</button><button data-view="jobs">Jobs</button><button data-view="memory">Memory</button></nav>
+<div id="chat" class="view">
+  <div class="jbar">
+    <select id="chatpick" aria-label="Conversation" style="flex:1;min-width:0"></select>
+    <select id="chatmodel" aria-label="Model"><option value="better">8B, better</option><option value="faster">4B, faster</option></select>
+    <button class="ghost" id="chatdel">Delete</button>
+  </div>
+  <div id="msgs"></div>
+</div>
+<div id="log" class="view">
+  <div class="jbar"><span class="hint" style="flex:1">Tasks run commands on the server, with your approval.</span><button class="ghost" id="clear">Clear</button><button class="ghost" id="stop">Stop</button></div>
+  <div id="events"></div>
+</div>
+<div id="memory" class="view">
+  <p class="hint" style="margin-top:0">Facts the assistant knows about you, one per line. They go at the start of every chat and task, so keep them short. In a chat, "remember that ..." adds one.</p>
+  <textarea id="memtext" spellcheck="false"></textarea>
+  <div class="jbar" style="margin-top:8px"><span class="hint" id="memcount" style="flex:1"></span><button class="approve" id="memsave" style="flex:none">Save</button></div>
+</div>
+<div id="jobs" class="view">
   <div class="jbar">
     <select id="jfilter"><option value="new">New</option><option value="applied">Applied</option><option value="skipped">Skipped</option><option value="all">All</option></select>
     <button class="ghost" id="jrun">Run now</button>
@@ -614,14 +876,14 @@ function render(ev){
   else if (ev.kind === "rejected") box.append(el("div", "err", "Denied" + (ev.text ? ": " + ev.text : "")));
   else if (ev.kind === "answer") box.append(el("div", "answer", ev.text));
   else box.append(el("div", "err", ev.text));
-  $("log").append(box);
+  $("events").append(box);
 }
 async function poll(){
   try {
     const r = await fetch("api/state?since=" + last);
     if (!r.ok) { $("status").textContent = "error " + r.status; return; }
     const s = await r.json();
-    if (s.seq < last) { last = 0; $("log").replaceChildren(); return poll(); }
+    if (s.seq < last) { last = 0; $("events").replaceChildren(); return poll(); }
     const log = $("log");
     const nearBottom = log.scrollHeight - log.scrollTop - log.clientHeight < 80;
     for (const e of s.events) { render(e); last = Math.max(last, e.n); }
@@ -645,12 +907,18 @@ async function post(path, body){
   if (!r.ok) { const t = await r.json().catch(() => ({})); alert(t.detail || ("Error " + r.status)); }
   poll();
 }
-$("send").onclick = () => { const t = $("task").value.trim(); if (!t) return; $("task").value = ""; post("api/task", {task: t}); };
+$("send").onclick = () => {
+  if (view === "chat" && chatAbort) { chatAbort.abort(); return; }
+  const t = $("task").value.trim();
+  if (!t) return;
+  $("task").value = "";
+  if (view === "chat") sendChat(t); else post("api/task", {task: t});
+};
 $("task").addEventListener("keydown", e => { if (e.key === "Enter") $("send").click(); });
 $("approve").onclick = () => { if (pendingId) { const id = pendingId; pendingId = "sent"; post("api/decision", {id: id, approve: true}); } };
 $("deny").onclick = () => { if (pendingId) { const id = pendingId; pendingId = "sent"; post("api/decision", {id: id, approve: false, reason: $("reason").value}); } };
 $("stop").onclick = () => post("api/stop");
-$("clear").onclick = () => { post("api/clear").then(() => { last = 0; $("log").replaceChildren(); }); };
+$("clear").onclick = () => { post("api/clear").then(() => { last = 0; $("events").replaceChildren(); }); };
 function b64ToBytes(s){
   const pad = "=".repeat((4 - s.length % 4) % 4);
   const raw = atob((s + pad).replace(/-/g, "+").replace(/_/g, "/"));
@@ -681,15 +949,149 @@ async function setupAlerts(){
 }
 const KIND = {fact: "from profile.json", draft: "draft by the local model, check every claim",
   legal: "read and answer yourself", you: "needs you", file: "attach", eeo: "voluntary"};
-let view = "log", jobsSig = "", openJob = null, openBody = null;
+const VIEWS = ["chat", "log", "jobs", "memory"];
+let view = "", jobsSig = "", openJob = null, openBody = null;
 function showView(v){
+  if (!VIEWS.includes(v)) v = "chat";
   view = v;
-  $("log").style.display = v === "log" ? "" : "none";
-  $("jobs").style.display = v === "jobs" ? "block" : "none";
-  $("jobsbtn").textContent = v === "jobs" ? "Log" : "Jobs";
-  history.replaceState(null, "", v === "jobs" ? "#jobs" : location.pathname);
+  for (const name of VIEWS) $(name).classList.toggle("on", name === v);
+  for (const b of $("tabs").children) b.classList.toggle("on", b.dataset.view === v);
+  document.querySelector("footer").style.display = (v === "chat" || v === "log") ? "" : "none";
+  $("task").placeholder = v === "chat" ? "Message" : "Give the agent a task";
+  history.replaceState(null, "", "#" + v);
+  try { localStorage.setItem("view", v); } catch (e) {}
   if (v === "jobs") { jobsSig = ""; loadJobs(); }
+  if (v === "memory") loadMemory();
+  if (v === "chat" && !chatLoaded) { chatLoaded = true; loadChatList(); openChat(chatId); }
 }
+
+// ---------- chat ----------
+let chatId = "", chatAbort = null, chatLoaded = false;
+try { chatId = localStorage.getItem("chat") || ""; } catch (e) {}
+function nearEnd(box){ return box.scrollHeight - box.scrollTop - box.clientHeight < 120; }
+// Light formatting for replies: code blocks, **bold**, `code` and # headings. Built
+// from text nodes and elements, never innerHTML, like the rest of the page.
+function inline(parent, line){
+  for (const piece of line.split(/(\*\*[^*\n]+\*\*|`[^`\n]+`)/)) {
+    if (/^\*\*[^*]+\*\*$/.test(piece)) { const b = el("strong"); inline(b, piece.slice(2, -2)); parent.append(b); }
+    else if (/^`[^`]+`$/.test(piece)) parent.append(el("code", null, piece.slice(1, -1)));
+    else if (piece) parent.append(document.createTextNode(piece));
+  }
+}
+function rich(box, text){
+  box.replaceChildren();
+  const fence = /```[^\n]*\n?([\s\S]*?)(?:```|$)/g;
+  let at = 0, m;
+  const prose = t => t.split("\n").forEach((line, i) => {
+    if (i) box.append(document.createTextNode("\n"));
+    const h = line.match(/^#{1,6}\s+(.*)$/);
+    if (h) box.append(el("strong", null, h[1])); else inline(box, line);
+  });
+  while ((m = fence.exec(text))) {
+    prose(text.slice(at, m.index));
+    box.append(pre(m[1].replace(/\n$/, "")));
+    at = fence.lastIndex;
+  }
+  prose(text.slice(at));
+}
+function addMsg(role, text){
+  const d = el("div", "msg " + role);
+  if (role === "assistant") rich(d, text); else d.textContent = text;
+  $("msgs").append(d);
+  return d;
+}
+async function loadChatList(){
+  let list = [];
+  try { list = await (await fetch("api/chats")).json(); } catch (e) {}
+  const pick = $("chatpick");
+  pick.replaceChildren(el("option", null, "New chat"));
+  pick.firstChild.value = "";
+  for (const c of list) { const o = el("option", null, c.title); o.value = c.id; pick.append(o); }
+  if (chatId && !list.some(c => c.id === chatId)) chatId = "";
+  pick.value = chatId;
+}
+async function openChat(id){
+  chatId = id;
+  try { localStorage.setItem("chat", id); } catch (e) {}
+  $("msgs").replaceChildren();
+  $("chatdel").style.display = id ? "" : "none";
+  if (!id) { $("msgs").append(el("div", "hint", "Ask anything. Replies are written on this server, with no internet access. Say 'remember that ...' to save a fact about you.")); return; }
+  try {
+    const r = await fetch("api/chats/" + encodeURIComponent(id));
+    if (!r.ok) { openChat(""); return; }
+    const c = await r.json();
+    for (const m of c.messages) addMsg(m.role, m.content);
+  } catch (e) {}
+  $("chat").scrollTop = $("chat").scrollHeight;
+}
+async function sendChat(text){
+  if (chatAbort) return;
+  if (!chatId) $("msgs").replaceChildren();
+  addMsg("user", text);
+  const out = addMsg("assistant", "Thinking. After a pause or a model switch, the first reply can take a minute.");
+  out.classList.add("typing");
+  const box = $("chat");
+  box.scrollTop = box.scrollHeight;
+  chatAbort = new AbortController();
+  $("send").textContent = "Stop";
+  let got = "";
+  try {
+    const r = await fetch("api/chat", {method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({message: text, chat_id: chatId, model: $("chatmodel").value}), signal: chatAbort.signal});
+    if (!r.ok) {
+      const t = await r.json().catch(() => ({}));
+      out.textContent = t.detail || ("Error " + r.status);
+      out.classList.add("err");
+      return;
+    }
+    const id = r.headers.get("X-Chat-Id") || "";
+    const isNew = id !== chatId;
+    chatId = id;
+    try { localStorage.setItem("chat", id); } catch (e) {}
+    const reader = r.body.getReader(), dec = new TextDecoder();
+    for (;;) {
+      const {done, value} = await reader.read();
+      if (done) break;
+      const follow = nearEnd(box);
+      got += dec.decode(value, {stream: true});
+      rich(out, got);
+      out.classList.remove("typing");
+      if (follow) box.scrollTop = box.scrollHeight;
+    }
+    if (isNew) { await loadChatList(); $("chatdel").style.display = ""; }
+  } catch (e) {
+    out.classList.remove("typing");
+    rich(out, got + (e.name === "AbortError" ? " (stopped)" : "\n(connection lost)"));
+  } finally {
+    chatAbort = null;
+    $("send").textContent = "Send";
+  }
+}
+$("chatpick").onchange = () => { if (!chatAbort) openChat($("chatpick").value); };
+$("chatdel").onclick = async () => {
+  if (!chatId || !confirm("Delete this conversation?")) return;
+  await fetch("api/chats/" + encodeURIComponent(chatId), {method: "DELETE"});
+  await openChat("");
+  loadChatList();
+};
+try { $("chatmodel").value = localStorage.getItem("chatmodel") || "better"; } catch (e) {}
+$("chatmodel").onchange = () => { try { localStorage.setItem("chatmodel", $("chatmodel").value); } catch (e) {} };
+
+// ---------- memory ----------
+let memMax = 2000;
+function memCount(){ const n = $("memtext").value.length; $("memcount").textContent = n + " of " + memMax + " characters"; }
+async function loadMemory(){
+  try { const m = await (await fetch("api/memory")).json(); $("memtext").value = m.text; memMax = m.max; } catch (e) {}
+  memCount();
+}
+$("memtext").oninput = memCount;
+$("memsave").onclick = async () => {
+  const r = await fetch("api/memory", {method: "PUT", headers: {"Content-Type": "application/json"}, body: JSON.stringify({text: $("memtext").value})});
+  if (!r.ok) { const t = await r.json().catch(() => ({})); alert(t.detail || ("Error " + r.status)); return; }
+  $("memsave").textContent = "Saved";
+  setTimeout(() => { $("memsave").textContent = "Save"; }, 1500);
+};
+for (const b of $("tabs").children) b.onclick = () => showView(b.dataset.view);
 function jobsMeta(s){
   const p = s.progress, lr = s.last_run;
   if (p.running) return "Running: " + p.step + (p.total ? " (" + p.done + "/" + p.total + ")" : "");
@@ -781,13 +1183,14 @@ async function toggleJob(id, body, reopen){
   }
   body.append(btns);
 }
-$("jobsbtn").onclick = () => showView(view === "jobs" ? "log" : "jobs");
 $("jfilter").onchange = () => { openJob = null; jobsSig = ""; loadJobs(); };
 $("jrun").onclick = () => post("api/jobs/run").then(() => setTimeout(loadJobs, 500));
 if ("serviceWorker" in navigator) navigator.serviceWorker.addEventListener("message", e => { if (e.data && e.data.view) showView(e.data.view); });
 setInterval(() => { if (view === "jobs") loadJobs(); }, 5000);
-window.addEventListener("hashchange", () => showView(location.hash === "#jobs" ? "jobs" : "log"));
-if (location.hash === "#jobs") showView("jobs");
+window.addEventListener("hashchange", () => { const v = location.hash.slice(1); if (v !== view) showView(v); });
+let startView = location.hash.slice(1);
+if (!VIEWS.includes(startView)) { try { startView = localStorage.getItem("view") || "chat"; } catch (e) { startView = "chat"; } }
+showView(startView);
 setInterval(poll, 1500);
 poll();
 setupAlerts();

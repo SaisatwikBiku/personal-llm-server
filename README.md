@@ -52,7 +52,7 @@ CPU temperature idled at 42 to 44°C, sat at 67 to 77°C while generating, and p
 
 Several design choices come straight from the benchmarks. The system prompt is short and never changes, so it stays in Ollama's cache. Tool output is cut to 2,000 characters before the model sees it, and stderr gets a separate 400-character budget, because a few dozen "Permission denied" lines were once enough to double a step's time. Only the last five action and result pairs stay in context. Each task is capped at 15 steps.
 
-`server.py` is a FastAPI app that runs the same loop in a background thread and serves a single-page control panel. When the model proposes an action that needs approval, the loop blocks until I tap Approve or Deny on the phone. A denial can carry a reason, which goes back to the model as the tool result, and that is how I steer it. The panel polls the server every 1.5 seconds and is installed on the phone as a home-screen web app. It sends Web Push notifications when an action needs approval and when a task finishes or fails. The push payload is encrypted end to end, so Apple's push service relays it without being able to read it.
+`server.py` is a FastAPI app that serves a single-page control panel with four tabs. Chat is a plain conversation with the 8B model (or the 4B for speed): replies stream in as they're written, conversations are saved, and there are no tools, so nothing needs approval. Memory is a short list of facts about me that goes at the start of every chat and task; I edit it in the Memory tab or say "remember that ..." in a chat. Tasks runs the tool loop above in a background thread. When the model proposes an action that needs approval, the loop blocks until I tap Approve or Deny on the phone. A denial can carry a reason, which goes back to the model as the tool result, and that is how I steer it. The panel polls the server every 1.5 seconds and is installed on the phone as a home-screen web app. It sends Web Push notifications when an action needs approval and when a task finishes or fails. The push payload is encrypted end to end, so Apple's push service relays it without being able to read it.
 
 `toolrunner.py` is a short helper that executes one tool as the unprivileged `agent` user. The server calls it through sudo, which is the core of the security model.
 
@@ -239,6 +239,9 @@ All settings are environment variables, set in the systemd unit or a drop-in fil
 | `AGENT_PUSH_SUB` | `mailto:agent@example.com` | Contact address sent to push services |
 | `AGENT_ALLOWED_LOGIN` | unset | If set, only this Tailscale login may use the panel |
 | `AGENT_JOBS_DIR` | `/home/agentd/jobs` | Job search config, profile, resume and results |
+| `AGENT_CHAT_MODEL` | `qwen3:8b` | Model for the chat tab's "8B, better" setting |
+| `AGENT_CHATS` | `/home/agentd/chats.json` | Saved chat conversations |
+| `AGENT_MEMORY` | `/home/agentd/memory.md` | Facts added to every chat and task |
 
 Tools that run without approval are listed in `AUTO_APPROVE` in `agent.py`.
 
@@ -280,6 +283,6 @@ A few things this particular laptop needed, which may save time on similar hardw
 
 A 4B model makes confident mistakes. During testing it suggested `sort -hr | tail -5` to find the five largest directories, which returns the five smallest, and it once ranked 16K above 32K. The system prompt now tells it to let commands do sorting and arithmetic, which fixed those cases, but the approval step is the real safeguard, and reading each command before approving it is part of using this.
 
-Each task starts with an empty context, so the agent remembers nothing between tasks. Only one task runs at a time. Stopping a task takes effect after the current model call returns, which can take up to half a minute.
+Each task starts with an empty context apart from the memory list, so the agent remembers nothing else between tasks. Chat keeps its conversation, but only the most recent 12,000 characters are sent to the model. Only one task runs at a time. Stopping a task takes effect after the current model call returns, which can take up to half a minute.
 
 The CPU does all the work, so a task that needs many steps or reads long output takes minutes. The 8B model gives better answers at half the speed, and switching to it is a one-line change to `AGENT_MODEL`.

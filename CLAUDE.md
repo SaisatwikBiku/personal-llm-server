@@ -39,6 +39,8 @@ Network is Wi-Fi only, configured in `/etc/netplan/50-cloud-init.yaml`. cloud-in
 | `/home/agentd/actions.jsonl` | Action log for the web panel, rotated weekly, 12 kept |
 | `/home/agentd/vapid_private.pem` | Web Push signing key (mode 600) |
 | `/home/agentd/push_subscriptions.json` | Saved push subscriptions for Sai's phone |
+| `/home/agentd/chats.json` | Chat conversations, 50 most recent kept (mode 600) |
+| `/home/agentd/memory.md` | Facts about Sai, one per line, max 2,000 characters; added to every chat and panel task (mode 600) |
 | `/home/agent/actions.jsonl` | Log for the terminal version only |
 | `/opt/searxng/settings.yml` | SearXNG config (JSON output on, limiter off, contains a secret key) |
 | `/home/agentd/jobs/` | Job search: `config.json`, `profile.json` (Sai's contact details and form answers), `resume.txt` (for scoring and drafts), `resume.pdf` (attached by the autofill script), `jobs.json` (results). Mode 700, files 600, owned by `agentd` |
@@ -72,7 +74,9 @@ Measured on this machine with Ollama `--verbose`:
 | Measurement | Value |
 |---|---|
 | 4B generation, 2 / 4 / 6 / 8 threads | 9.90 / 10.58 / 10.85 / 11.83 tokens/s |
-| 8B generation, 8 threads | 6.54 tokens/s |
+| 8B generation, 8 threads | 6.54 tokens/s (5.5 tokens/s streamed in chat) |
+| 8B load / prompt processing uncached | about 5 s / 17 tokens/s |
+| 8B first chat token, cached prompt | 0.2 s |
 | Prompt processing (520 and 934 token prompts) | about 30 tokens/s |
 | Cached prompt example | 974 of 1,011 tokens cached, 1.7 s |
 | Typical agent step | 4 to 16 s |
@@ -105,7 +109,10 @@ What follows from these numbers, and should stay true:
 - `run_tool()` calls `toolrunner.py` through `sudo -n -u agent -H` when `AGENT_USE_TOOLRUNNER=1`, otherwise in-process.
 - Web Push: VAPID key generated on first start, subscriptions stored as JSON, `notify()` sends in a background thread and drops subscriptions that return 404 or 410. Pushes go out for "Approval needed", "Task done", step limit, and agent errors.
 - `check_user()` enforces `AGENT_ALLOWED_LOGIN` against the `Tailscale-User-Login` header when set (not set currently).
-- The page, manifest and service worker are inline strings (`PAGE`, `MANIFEST`, `SERVICE_WORKER`). The page renders all model output with `textContent`, never `innerHTML`. Keep it that way.
+- The page, manifest and service worker are inline strings (`PAGE`, `MANIFEST`, `SERVICE_WORKER`). The page renders all model output with `textContent`, never `innerHTML`. Keep it that way. `PAGE` and `FILL_SCRIPT` are raw strings (`r"""`), so JavaScript escapes like `\n` and regex backslashes are written exactly as the browser should get them.
+- Tabs: Chat (default), Tasks (the approval agent), Jobs, Memory. The approval card shows over any tab.
+- Chat: `POST /api/chat` stores Sai's message, then streams the reply as plain text (`X-Chat-Id` header names the conversation). `write_reply()` runs the Ollama stream in a thread and `stream_reply()` checks `request.is_disconnected()` every 0.1 s; on Stop or a closed page it sets the stop flag and the thread closes the Ollama stream, which makes Ollama stop generating. The first version streamed from a plain generator and Ollama kept writing for minutes after Stop, so keep the thread. `chat_active` allows one reply at a time, and `panel_busy()` counts it so the job search waits. Chat has no tools and no network access, so it needs no approvals; don't give it tools without the approval flow. Models: "better" = `AGENT_CHAT_MODEL` (default `qwen3:8b`, thinking off), "faster" = `agent-4b`. History sent to the model is capped at `CHAT_HISTORY_CHARS` (12,000, about 3,000 tokens) because after a model switch the 8B rereads it at 17 tokens/s. The system prompt, memory and date come first and stay byte-stable within a day so Ollama's cache covers them.
+- Memory: `memory.md`, edited in the Memory tab (`GET/PUT /api/memory`) or by a chat message starting "remember that ..." / "remember: ...", which `REMEMBER_RE` catches and saves verbatim without calling the model. `memory_block()` is appended to the chat system prompt and to `core.SYSTEM_PROMPT` for panel tasks (not the terminal version, which runs as `agent` and can't read `/home/agentd`).
 
 `toolrunner.py` reads `{"arg", "content"}` JSON on stdin, runs one tool from `agent.TOOLS`, prints the result.
 
