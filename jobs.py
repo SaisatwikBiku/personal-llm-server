@@ -6,7 +6,7 @@ application. It prepares the answers and Sai applies through the posting link.
 
 Network access is limited to URLs this module builds itself: the public job board
 APIs of Greenhouse, Lever, Ashby, Workday (<tenant>.wdN.myworkdayjobs.com) and
-SmartRecruiters, and the local SearXNG. Model output never
+SmartRecruiters, and the local SearXNG, plus IMAP for the agent's own inbox. Model output never
 becomes a URL or request data, and no personal data leaves the machine.
 
 Files in JOBS_DIR (default /home/agentd/jobs, which the agent user can't read):
@@ -14,6 +14,8 @@ Files in JOBS_DIR (default /home/agentd/jobs, which the agent user can't read):
     profile.json  facts for application forms (deploy/jobs-profile.example.json)
     resume.txt    plain-text resume used for scoring and drafts
     jobs.json     everything found so far, written by this module
+    mail.json     the agent inbox's address and app password (set from the panel)
+    inbox.json    emails read from that inbox
 """
 import html
 import json
@@ -1133,7 +1135,7 @@ def detail(job_id):
         return None
     if job.get("answers") is not None:
         job["answers"] = refresh_answers(job, load_json(JOBS_DIR / "profile.json", {}))
-    return {**job, "apply_url": apply_url(job)}
+    return {**job, "apply_url": apply_url(job), "emails": job_emails(job_id)}
 
 
 def profile_form():
@@ -1277,6 +1279,221 @@ def prepare_now(job_id, is_busy):
     if cfg["draft_model"] != core.MODEL:
         restore_default_model()
     return update_db(lambda db: db["jobs"][job_id].update(answers=answers, note=note) or True)
+
+
+# ---------- inbox ----------
+# The agent's own email address, which Sai uses on applications. It is read over IMAP,
+# read-only (messages stay unread for Sai), to follow up on applications. Email text is
+# untrusted: it's never given to a model, links in it are never opened, and the panel
+# shows it as plain text.
+
+MAIL_FILE = JOBS_DIR / "mail.json"    # {"address", "password"}; the password never leaves this file
+INBOX_FILE = JOBS_DIR / "inbox.json"  # {"uidvalidity", "last_uid", "checked", "error", "messages"}
+IMAP_HOSTS = {  # the server comes from the address, never from input
+    "gmail.com": "imap.gmail.com", "googlemail.com": "imap.gmail.com",
+    "icloud.com": "imap.mail.me.com", "me.com": "imap.mail.me.com",
+    "fastmail.com": "imap.fastmail.com", "yahoo.com": "imap.mail.yahoo.com",
+}
+ADDRESS_RE = re.compile(r"^[A-Za-z0-9._%+-]{1,64}@([A-Za-z0-9.-]{1,100})$")
+INBOX_KEEP = 300          # messages kept for the panel, newest first
+INBOX_FIRST_DAYS = 30     # how far back the first check reads
+INBOX_BATCH = 60          # messages read per check at most
+INBOX_MAX_BYTES = 2_000_000  # bigger messages (attachments) are read by their headers only
+SNIPPET_CHARS = 1500
+inbox_lock = threading.Lock()
+
+VERIFY_RE = re.compile(r"verif|confirm your (email|account)|one.time (pass)?code|security code|"
+                       r"sign.?in code|activate your account|passcode|access code", re.I)
+REJECT_RE = re.compile(r"unfortunately|not (to )?(be )?mov(e|ing) forward|decided (not )?to (pursue|proceed|move forward) with other|"
+                       r"other candidates|no longer (being )?considered|position has been filled|not been selected|"
+                       r"will not be proceeding|regret to inform", re.I)
+INTERVIEW_RE = re.compile(r"would like to (invite|schedule|speak|chat|set up)|invite you to|"
+                          r"schedule (a|an|your) (call|chat|time|phone|video|conversation)|your availability|"
+                          r"recruiter (call|screen)|phone screen|coding (challenge|assessment|exercise)|online assessment|"
+                          r"hackerrank|codesignal|codility|take.home", re.I)
+CONFIRM_RE = re.compile(r"thank(s| you) for (applying|your application|submitting|your interest)|"
+                        r"application (has been |was )?(received|submitted)|we('ve| have) received your application|"
+                        r"successfully (applied|submitted)", re.I)
+CODE_RE = re.compile(r"(?:code|passcode|pin)\D{0,40}?\b(\d{4,8})\b", re.I)
+STATUS_AFTER = {"confirmation": "applied", "interview": "interview", "rejection": "rejected"}
+
+
+def mail_config():
+    return load_json(MAIL_FILE, None)
+
+
+def imap_host(address):
+    m = ADDRESS_RE.match(address or "")
+    return m and IMAP_HOSTS.get(m.group(1).lower())
+
+
+def imap_login(address, password):
+    import imaplib, ssl
+    host = imap_host(address)
+    if not host:
+        raise ValueError("Use a Gmail, iCloud, Fastmail or Yahoo address.")
+    conn = imaplib.IMAP4_SSL(host, 993, ssl_context=ssl.create_default_context(), timeout=30)
+    try:
+        conn.login(address, password)
+    except imaplib.IMAP4.error:
+        conn.logout()
+        raise ValueError("The mail server refused the login. For Gmail, use an app password, not the account password.")
+    return conn
+
+
+def set_mail(address, password):
+    """Check the login, then save it. The profile's email becomes this address."""
+    address, password = address.strip(), password.replace(" ", "")
+    imap_login(address, password).logout()
+    save_json(MAIL_FILE, {"address": address, "password": password})
+    profile = load_json(JOBS_DIR / "profile.json", {})
+    profile["email"] = address
+    save_json(JOBS_DIR / "profile.json", profile)
+    with inbox_lock:
+        save_json(INBOX_FILE, {"messages": []})
+
+
+def remove_mail():
+    for path in (MAIL_FILE, INBOX_FILE):
+        path.unlink(missing_ok=True)
+
+
+def message_text(msg):
+    part = msg.get_body(preferencelist=("plain", "html"))
+    if part is None:
+        return ""
+    try:
+        text = part.get_content()
+    except Exception:  # unknown charset
+        text = part.get_payload(decode=True).decode("utf-8", "replace")
+    return html_to_text(text) if part.get_content_type() == "text/html" else text.strip()
+
+
+def classify_email(subject, text):
+    both = subject + "\n" + text[:4000]
+    if VERIFY_RE.search(subject):
+        return "verification"
+    if REJECT_RE.search(both):
+        return "rejection"
+    if INTERVIEW_RE.search(both):
+        return "interview"
+    if CONFIRM_RE.search(both):
+        return "confirmation"
+    if VERIFY_RE.search(both) and CODE_RE.search(both):
+        return "verification"
+    return "other"
+
+
+def match_job(jobs, sender, subject, text):
+    """The job an email is about: its company named by the sender or the subject (or,
+    for longer names, the start of the body), then the most title words in common."""
+    strong = " " + norm_label(sender + " " + subject) + " "
+    body = " " + norm_label(text[:1500]) + " "
+    words = set(norm_label(subject + " " + text[:1500]).split())
+    best, best_score = None, 0
+    for job in jobs:
+        company = norm_label(job["company"].split(" - ")[0])
+        if not company:
+            continue
+        named = f" {company} " in strong or f" {company.replace(' ', '')} " in strong
+        if not named and not (len(company) >= 6 and f" {company} " in body):
+            continue
+        title = set(norm_title(job["title"]).split()) - {"and", "of", "the", "i", "ii"}
+        score = 1 + len(title & words) / max(len(title), 1) + (0.5 if job["status"] == "applied" else 0)
+        if score > best_score:
+            best, best_score = job, score
+    return best
+
+
+def check_inbox(notify=lambda *a, **k: None):
+    """Read new mail, match it to jobs, move their status along and push what needs Sai."""
+    import email, email.policy, email.utils
+    cfg = mail_config()
+    if not cfg:
+        return
+    with inbox_lock:
+        state = load_json(INBOX_FILE, {})
+        state.setdefault("messages", [])
+        try:
+            conn = imap_login(cfg["address"], cfg["password"])
+        except Exception as e:
+            state.update(error=str(e), checked=stamp())
+            save_json(INBOX_FILE, state)
+            raise
+        try:
+            conn.select("INBOX", readonly=True)
+            validity = (conn.response("UIDVALIDITY")[1] or [b""])[0]
+            validity = validity.decode() if isinstance(validity, bytes) else str(validity)
+            if validity != state.get("uidvalidity"):
+                state.update(uidvalidity=validity, last_uid=0)
+            last = state.get("last_uid") or 0
+            if last:
+                _, data = conn.uid("search", None, f"UID {last + 1}:*")
+            else:
+                since = (datetime.now(timezone.utc) - timedelta(days=INBOX_FIRST_DAYS)).strftime("%d-%b-%Y")
+                _, data = conn.uid("search", None, f"SINCE {since}")
+            uids = sorted(int(u) for u in (data[0] or b"").split() if int(u) > last)[-INBOX_BATCH:]
+            fresh = []
+            for uid in uids:
+                _, meta = conn.uid("fetch", str(uid), "(RFC822.SIZE)")
+                size = re.search(rb"RFC822\.SIZE (\d+)", meta[0] or b"")
+                part = "BODY.PEEK[]" if size and int(size.group(1)) <= INBOX_MAX_BYTES else "BODY.PEEK[HEADER]"
+                _, got = conn.uid("fetch", str(uid), f"({part})")
+                raw = next((x[1] for x in got if isinstance(x, tuple)), b"")
+                msg = email.message_from_bytes(raw, policy=email.policy.default)
+                name, addr = email.utils.parseaddr(str(msg.get("From", "")))
+                subject = str(msg.get("Subject", ""))[:300]
+                text = message_text(msg) if part == "BODY.PEEK[]" else ""
+                try:
+                    when = email.utils.parsedate_to_datetime(str(msg.get("Date"))).astimezone(timezone.utc).isoformat(timespec="seconds")
+                except Exception:
+                    when = stamp()
+                kind = classify_email(subject, text)
+                code = CODE_RE.search(subject + "\n" + text[:3000]) if kind == "verification" else None
+                fresh.append({"uid": uid, "from": (name or addr)[:120], "from_addr": addr[:200],
+                              "subject": subject, "date": when, "kind": kind,
+                              "code": code.group(1) if code else "", "snippet": text[:SNIPPET_CHARS]})
+                state["last_uid"] = uid
+        finally:
+            try:
+                conn.logout()
+            except Exception:
+                pass
+        if fresh:
+            def apply(db):
+                jobs = list(db["jobs"].values())
+                for m in fresh:
+                    job = match_job(jobs, m["from"] + " " + m["from_addr"].split("@")[-1], m["subject"], m["snippet"])
+                    if not job:
+                        continue
+                    m.update(job_id=job["id"], company=job["company"], title=job["title"])
+                    new = STATUS_AFTER.get(m["kind"])
+                    # a confirmation only moves a job forward from new; the others always apply
+                    if new and not (new == "applied" and job["status"] != "new"):
+                        job.update(status=new, status_at=stamp())
+            update_db(apply)
+        state["messages"] = (list(reversed(fresh)) + state["messages"])[:INBOX_KEEP]
+        state.update(error="", checked=stamp())
+        save_json(INBOX_FILE, state)
+    for m in fresh:
+        who = m.get("company") or m["from"]
+        if m["kind"] == "interview":
+            notify("Interview request", f"{who}: {m['subject']}", tag="inbox")
+        elif m["kind"] == "verification":
+            notify("Verification email", f"{who}: " + (f"code {m['code']}" if m["code"] else m["subject"]), tag="inbox")
+    return len(fresh)
+
+
+def inbox_summary():
+    cfg = mail_config()
+    state = load_json(INBOX_FILE, {}) if cfg else {}
+    return {"configured": bool(cfg), "address": cfg["address"] if cfg else "",
+            "checked": state.get("checked"), "error": state.get("error", ""),
+            "messages": state.get("messages", [])}
+
+
+def job_emails(job_id):
+    return [m for m in load_json(INBOX_FILE, {}).get("messages", []) if m.get("job_id") == job_id]
 
 
 if __name__ == "__main__":  # manual run: python jobs.py

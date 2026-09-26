@@ -471,6 +471,27 @@ def jobs_loop():
 
 threading.Thread(target=jobs_loop, daemon=True).start()
 
+INBOX_EVERY = 300  # seconds between mail checks
+
+
+def inbox_loop():
+    """Check the agent's inbox (see jobs.check_inbox). Separate from jobs_loop, which is
+    busy for hours during the nightly run."""
+    last_error = ""
+    while True:
+        try:
+            jobs.check_inbox(notify)
+            last_error = ""
+        except Exception as e:
+            if str(e) != last_error:
+                last_error = str(e)
+                print(f"inbox error: {e}", flush=True)
+                notify("Inbox error", str(e), tag="inbox")
+        time.sleep(INBOX_EVERY)
+
+
+threading.Thread(target=inbox_loop, daemon=True).start()
+
 
 # ---------- HTTP ----------
 
@@ -569,6 +590,9 @@ def stop(request: Request):
     return {"ok": True}
 
 
+JOB_STATUSES = ("new", "applied", "interview", "rejected", "skipped")
+
+
 class JobIn(BaseModel):
     id: str
     status: str = ""
@@ -592,8 +616,8 @@ def jobs_detail(id: str, request: Request):
 @app.post("/api/jobs/status")
 def jobs_status(body: JobIn, request: Request):
     check_user(request)
-    if body.status not in ("new", "applied", "skipped"):
-        raise HTTPException(400, "Status must be new, applied or skipped")
+    if body.status not in JOB_STATUSES:
+        raise HTTPException(400, "Status must be one of " + ", ".join(JOB_STATUSES))
     if not jobs.set_status(body.id, body.status):
         raise HTTPException(404, "No such job")
     return {"ok": True}
@@ -616,6 +640,48 @@ def jobs_prepare(body: JobIn, request: Request):
     if not jobs.detail(body.id):
         raise HTTPException(404, "No such job")
     threading.Thread(target=jobs.prepare_now, args=(body.id, panel_busy), daemon=True).start()
+    return {"ok": True}
+
+
+class MailIn(BaseModel):
+    address: str
+    password: str
+
+
+@app.get("/api/inbox")
+def inbox_get(request: Request):
+    check_user(request)
+    return jobs.inbox_summary()
+
+
+@app.post("/api/inbox")
+def inbox_setup(body: MailIn, request: Request):
+    """Connect the agent's mailbox. The login is checked before anything is saved, and
+    the password is never sent back."""
+    check_user(request)
+    if len(body.address) > 200 or len(body.password) > 200:
+        raise HTTPException(400, "Too long")
+    try:
+        jobs.set_mail(body.address, body.password)
+    except (ValueError, OSError) as e:
+        raise HTTPException(400, str(e))
+    threading.Thread(target=jobs.check_inbox, args=(notify,), daemon=True).start()
+    return {"ok": True}
+
+
+@app.post("/api/inbox/check")
+def inbox_check(request: Request):
+    check_user(request)
+    try:
+        return {"new": jobs.check_inbox(notify) or 0}
+    except Exception as e:
+        raise HTTPException(502, str(e))
+
+
+@app.delete("/api/inbox")
+def inbox_remove(request: Request):
+    check_user(request)
+    jobs.remove_mail()
     return {"ok": True}
 
 
@@ -866,7 +932,7 @@ self.addEventListener("push", event => {
   let d = {};
   try { d = event.data.json(); } catch (e) { d = {title: "Agent", body: event.data ? event.data.text() : ""}; }
   event.waitUntil(self.registration.showNotification(d.title || "Agent", {
-    body: d.body || "", tag: d.tag || "agent", data: {url: d.tag === "jobs" ? "/#jobs" : "/"}
+    body: d.body || "", tag: d.tag || "agent", data: {url: (d.tag === "jobs" || d.tag === "inbox") ? "/#jobs" : "/"}
   }));
 });
 self.addEventListener("notificationclick", event => {
@@ -965,6 +1031,10 @@ input{font:inherit;font-size:16px;color:var(--fg);background:var(--card);border:
 .pfield .thought{margin-top:3px}
 .pfield.empty label::after{content:" \2022 empty";color:var(--deny);font-weight:400}
 #psave{position:sticky;bottom:0;background:var(--bg);padding:10px 0;border-top:1px solid var(--line);display:flex;gap:8px;align-items:center}
+.flag.kind-interview,.flag.kind-verification{border-color:var(--accent);color:var(--accent)}
+.flag.kind-rejection{border-color:var(--deny);color:var(--deny)}
+.code{font:600 22px ui-monospace,Menlo,Consolas,monospace;letter-spacing:2px;margin:6px 0}
+.setup input{margin-top:8px}
 .applylink{display:inline-block;background:var(--accent);color:#fff;text-decoration:none;border-radius:8px;padding:9px 14px;margin-bottom:10px}
 </style></head><body>
 <header>
@@ -997,7 +1067,7 @@ input{font:inherit;font-size:16px;color:var(--fg);background:var(--card);border:
 </div>
 <div id="jobs" class="view">
   <div class="jbar">
-    <select id="jfilter"><option value="new">New</option><option value="applied">Applied</option><option value="skipped">Skipped</option><option value="all">All</option></select>
+    <select id="jfilter"><option value="new">New</option><option value="applied">Applied</option><option value="interview">Interviewing</option><option value="rejected">Rejected</option><option value="skipped">Skipped</option><option value="all">All</option><option value="emails">Emails</option></select>
     <button class="ghost" id="jrun">Run now</button>
     <a class="ghost" id="jsetup" href="jobs-fill.user.js">Autofill script</a>
   </div>
@@ -1400,9 +1470,78 @@ function jobsMeta(s){
   if (lr.backlog) t += ", " + n(lr.backlog) + " left for the next run";
   return t + ". " + s.discovered + " companies found through search.";
 }
+let inboxSig = "";
+const MAIL_KIND = {interview: "Interview", rejection: "Rejection", confirmation: "Application received",
+  verification: "Verification", other: "Other"};
+function mailCard(m, withJob){
+  const c = el("div", "card job");
+  const f = el("div", "flags");
+  f.append(el("span", "flag kind-" + m.kind, MAIL_KIND[m.kind] || m.kind));
+  c.append(f, el("strong", null, m.subject || "(no subject)"));
+  const when = new Date(m.date).toLocaleString([], {dateStyle: "medium", timeStyle: "short"});
+  c.append(el("div", "tool", [m.from, when, withJob && m.company ? m.company + ": " + m.title : ""].filter(Boolean).join(" \u00b7 ")));
+  if (m.code) {
+    c.append(el("div", "code", m.code));
+    const b = el("button", "ghost", "Copy code");
+    b.onclick = () => navigator.clipboard.writeText(m.code).then(() => { b.textContent = "Copied"; });
+    c.append(b);
+  }
+  if (m.snippet) { const d = el("details"); d.append(el("summary", null, "Email text"), pre(m.snippet)); c.append(d); }
+  return c;
+}
+function inboxSetup(box, error){
+  const c = el("div", "card setup");
+  c.append(el("strong", null, "Connect the agent's inbox"),
+    el("div", "thought", "An address just for applications. The agent reads it every 5 minutes without marking anything read: confirmations mark jobs Applied, interview requests and rejections move them along, and verification codes show up here and as alerts. Links in emails are never opened. For Gmail, turn on 2-step verification and make an app password under Google Account, Security, App passwords. Your profile's email becomes this address."));
+  const addr = el("input"); addr.type = "email"; addr.placeholder = "Address"; addr.autocomplete = "off";
+  const pw = el("input"); pw.type = "password"; pw.placeholder = "App password"; pw.autocomplete = "new-password";
+  const b = el("button", "approve", "Connect"); b.style.marginTop = "8px";
+  const msg = el("div", "err", error || "");
+  b.onclick = async () => {
+    b.disabled = true; b.textContent = "Checking the login"; msg.textContent = "";
+    const r = await fetch("api/inbox", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({address: addr.value, password: pw.value})});
+    b.disabled = false; b.textContent = "Connect";
+    if (!r.ok) { const t = await r.json().catch(() => ({})); msg.textContent = t.detail || ("Error " + r.status); return; }
+    pw.value = ""; inboxSig = ""; loadInbox();
+  };
+  c.append(addr, pw, b, msg);
+  box.append(c);
+}
+async function loadInbox(){
+  let s;
+  try { const r = await fetch("api/inbox"); if (!r.ok) return; s = await r.json(); } catch (e) { return; }
+  if ($("jfilter").value !== "emails") return;
+  const sig = JSON.stringify(s);
+  if (sig === inboxSig) return;
+  inboxSig = sig;
+  const box = $("jlist");
+  box.replaceChildren();
+  $("jmeta").textContent = "";
+  if (!s.configured) { inboxSetup(box); return; }
+  const when = s.checked ? new Date(s.checked).toLocaleString([], {dateStyle: "medium", timeStyle: "short"}) : "not yet";
+  $("jmeta").textContent = s.address + ". Checked " + when + ".";
+  if (s.error) box.append(el("div", "err", s.error));
+  const bar = el("div", "btns");
+  const check = el("button", "ghost", "Check now");
+  check.onclick = async () => {
+    check.disabled = true;
+    const r = await fetch("api/inbox/check", {method: "POST"});
+    if (!r.ok) { const t = await r.json().catch(() => ({})); alert(t.detail || ("Error " + r.status)); }
+    check.disabled = false; inboxSig = ""; loadInbox();
+  };
+  const off = el("button", "ghost", "Disconnect");
+  off.onclick = async () => { if (!confirm("Disconnect the inbox? The saved login and the email list are deleted from the server.")) return; await fetch("api/inbox", {method: "DELETE"}); inboxSig = ""; loadInbox(); };
+  bar.append(check, off); bar.style.marginTop = "0"; bar.style.marginBottom = "10px";
+  box.append(bar);
+  if (!s.messages.length) box.append(el("div", "thought", "No emails yet."));
+  for (const m of s.messages) box.append(mailCard(m, true));
+}
 async function loadJobs(){
+  if ($("jfilter").value === "emails") { jobsSig = ""; return loadInbox(); }
+  inboxSig = "";
   let s;
   try { const r = await fetch("api/jobs"); if (!r.ok) return; s = await r.json(); } catch (e) { return; }
+  if ($("jfilter").value === "emails") return;  // switched while loading
   $("jmeta").textContent = jobsMeta(s);
   $("jrun").disabled = s.progress.running || !s.configured;
   const f = $("jfilter").value;
@@ -1451,6 +1590,10 @@ async function toggleJob(id, body, reopen){
     a.href = j.apply_url; a.target = "_blank"; a.rel = "noopener noreferrer";
     body.append(a);
   }
+  if (j.emails && j.emails.length) {
+    body.append(el("div", "q", "Emails"));
+    for (const m of j.emails) body.append(mailCard(m, false));
+  }
   if (j.answers) {
     for (const a of j.answers) {
       const row = el("div", "ans");
@@ -1473,7 +1616,8 @@ async function toggleJob(id, body, reopen){
   d.append(el("summary", null, "Posting text"), pre(j.description || ""));
   body.append(d);
   const btns = el("div", "btns");
-  for (const [label, st] of [["Applied", "applied"], ["Skip", "skipped"], ["Back to new", "new"]]) {
+  for (const [label, st] of [["Applied", "applied"], ["Interviewing", "interview"], ["Rejected", "rejected"], ["Skip", "skipped"], ["Back to new", "new"]]) {
+    if ((st === "interview" || st === "rejected") && j.status === "new") continue;
     if (st === j.status) continue;
     const b = el("button", st === "applied" ? "approve" : "ghost", label);
     b.onclick = () => post("api/jobs/status", {id: id, status: st}).then(() => { openJob = null; jobsSig = ""; loadJobs(); });

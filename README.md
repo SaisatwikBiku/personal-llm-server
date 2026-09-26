@@ -266,6 +266,8 @@ Copy the resume PDF into the jobs folder as `resume.pdf` (owned by `agentd`, mod
 - iPhone: install the free Userscripts app from the App Store, turn it on in Settings > Apps > Safari > Extensions and allow it on greenhouse.io, lever.co and ashbyhq.com, then open the Autofill script link in Safari and install it.
 - Mac: install Tampermonkey (Chrome) or Userscripts (Safari), then open the Autofill script link.
 
+To give the agent its own inbox, make a new Gmail address (turn on 2-step verification, then create an app password under Google Account, Security, App passwords), and in the Jobs view choose Emails and connect it. It becomes the email on your applications. Every 5 minutes the panel reads new mail without marking it read: an "application received" email marks the job Applied, interview requests and rejections move the job to Interviewing or Rejected, and verification codes appear in the list and as an alert. Email text is shown as plain text, never given to the model, and its links are never opened.
+
 On a Greenhouse, Lever or Ashby application page, tap Fill from agent. Workday and SmartRecruiters forms aren't supported; for those, copy answers from the job's card in the Jobs view. It fills text fields, dropdowns and yes/no questions from the answers prepared for that job (or from `profile.json` for any other job on those sites), attaches the resume, and outlines each field: green filled, blue a draft to read, orange for you. Consents, legal and demographic questions, and anything it has no answer for stay empty. Check everything, solve the CAPTCHA, submit, and tap Mark applied. It needs Tailscale on, since it asks the panel for the answers.
 
 ## Running a laptop as a server
