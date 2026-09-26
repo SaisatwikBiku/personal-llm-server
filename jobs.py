@@ -565,8 +565,108 @@ def draft_answer(job, question, resume, is_busy, model):
 
 # ---------- application answers ----------
 
-FACTS = [  # (label pattern, profile key); first match wins
-    (r"preferred (first )?name", "preferred_name"),
+YES_NO = ["Yes", "No"]
+DECLINE = "Decline to self-identify"
+# The application profile, as the panel's Profile form shows it. Built from the
+# questions on the forms of the jobs found so far. (key, label, choices or None, help)
+PROFILE_FORM = [
+    ("Name", [
+        ("first_name", "Legal first name", None, ""),
+        ("last_name", "Legal last name", None, ""),
+        ("full_name", "Full legal name", None, "As on your ID. Also names the resume file."),
+        ("preferred_name", "Preferred first name", None, "Leave empty to use your first name."),
+        ("pronouns", "Pronouns", ["He/him", "She/her", "They/them", DECLINE], ""),
+    ]),
+    ("Contact", [
+        ("email", "Email", None, "The address employers write to."),
+        ("phone", "Phone", None, "With country code, like +1 518 555 0100."),
+        ("address", "Street address", None, "For forms that ask where you'll work from."),
+        ("city", "City", None, ""),
+        ("state", "State", None, "Two letters, like NY."),
+        ("zip", "ZIP code", None, ""),
+        ("location", "City, state", None, "Like Albany, NY. Picks the place in location boxes."),
+        ("country", "Country you live in", None, ""),
+        ("us_resident", "Live in the US?", YES_NO, ""),
+    ]),
+    ("Links", [
+        ("linkedin", "LinkedIn URL", None, ""),
+        ("github", "GitHub URL", None, ""),
+        ("website", "Portfolio or website", None, ""),
+        ("twitter", "X / Twitter", None, "Optional."),
+    ]),
+    ("Work authorization", [
+        ("work_authorized", "Authorized to work in the US now?", YES_NO, "On OPT this is Yes."),
+        ("needs_sponsorship", "Need sponsorship now or in the future?", YES_NO,
+         "On OPT this is usually Yes: an H-1B later counts as future sponsorship."),
+        ("authorized_without_sponsorship", "Authorized to work without the company's sponsorship?", YES_NO,
+         "Asked as one question by some forms. On OPT most people answer No, since it runs out."),
+        ("visa_status", "Current status", None, "Like F-1 OPT, or F-1 STEM OPT until 2029-05."),
+        ("sponsorship_type", "Sponsorship you'll need", None, "Like H-1B. Used when a form asks what kind."),
+        ("citizenship", "Country of citizenship", None, ""),
+        ("us_person", "U.S. person for export control?", YES_NO,
+         "Citizens, green card holders, refugees and asylees are. F-1 and OPT are not."),
+        ("sanctioned_country", "Citizen or resident of Cuba, Iran, North Korea, Syria or Crimea?", YES_NO, ""),
+        ("over_18", "At least 18 years old?", YES_NO, ""),
+        ("clearance", "Security clearance", None, "Like None."),
+    ]),
+    ("Experience", [
+        ("current_company", "Current or most recent employer", None, ""),
+        ("current_title", "Current or most recent job title", None, ""),
+        ("years_experience", "Years of full-time software experience", None, "Not counting internships. A number."),
+        ("strongest_language", "Strongest programming language", None, ""),
+        ("restrictive_agreement", "Bound by a non-compete or similar agreement?", YES_NO, ""),
+        ("contact_employer", "May they contact your current employer?", YES_NO, ""),
+        ("past_employers", "Companies you've worked for, including internships and contracts", None,
+         "Comma separated, or None. \"Have you worked at X before?\" is answered Yes only for these."),
+        ("past_interviews", "Companies you've interviewed or applied at before", None,
+         "Comma separated, or None. Answers \"Have you interviewed with us before?\"."),
+        ("gov_employee", "Ever worked for a government, military or state-owned employer?", YES_NO, ""),
+        ("gov_official", "Government official now or in the last five years?", YES_NO, ""),
+        ("gov_relative", "Close relative of a government official?", YES_NO, ""),
+    ]),
+    ("Education, most recent degree", [
+        ("school", "School", None, "Full name, as school lists spell it."),
+        ("degree", "Degree", ["Bachelor's Degree", "Master's Degree", "Doctorate"], ""),
+        ("discipline", "Major", None, "Like Computer Science."),
+        ("graduation", "Graduation date", None, "Like May 2025."),
+        ("gpa", "GPA", None, "Leave empty if you'd rather not say."),
+        ("education", "One line summary", None, "Like M.S. Computer Science, University at Albany, 2025."),
+    ]),
+    ("Education, bachelor's degree", [
+        ("undergrad_school", "School", None, ""),
+        ("undergrad_discipline", "Major", None, ""),
+        ("undergrad_graduation", "Graduation date", None, ""),
+        ("undergrad_gpa", "GPA", None, ""),
+        ("gre_score", "GRE score", None, "Optional, like 320 (Q 168, V 152)."),
+    ]),
+    ("Job preferences", [
+        ("relocate", "Willing to relocate?", YES_NO, ""),
+        ("in_office", "Willing to work on-site or hybrid?", YES_NO, "Answers \"can you work from our office 3 days a week?\"."),
+        ("work_setup", "Remote, hybrid or on-site preference", None, "Like Open to remote, hybrid or on-site."),
+        ("start_date", "Earliest start date", None, "Like Immediately, or 2 weeks after an offer."),
+        ("salary", "Salary expectation", None, "Like $95,000 to $120,000, or Open to discussion."),
+        ("deadlines", "Offer deadlines or timeline", None, "Like None."),
+        ("accommodations", "Interview accommodations", None, "Like None."),
+        ("heard_about", "How you heard about jobs", None, "LinkedIn is one of the choices on most forms."),
+        ("marketing_opt_in", "Opt in to recruiting newsletters and text messages?", YES_NO, ""),
+    ]),
+    ("Voluntary self-identification", [
+        ("gender", "Gender", ["Male", "Female", "Non-binary", DECLINE], "Voluntary. Never affects screening by law."),
+        ("race", "Race", ["Asian", "Black or African American", "White", "Hispanic or Latino",
+                          "Two or More Races", "Native Hawaiian or Other Pacific Islander",
+                          "American Indian or Alaska Native", DECLINE], ""),
+        ("hispanic", "Hispanic or Latino?", ["Yes", "No", DECLINE], ""),
+        ("veteran", "Protected veteran?", ["I am not a protected veteran", "I identify as one or more of the classifications of a protected veteran", DECLINE], ""),
+        ("disability", "Disability", ["No, I do not have a disability", "Yes, I have a disability", DECLINE], ""),
+    ]),
+]
+PROFILE_KEYS = {key for _, fields in PROFILE_FORM for key, *_ in fields}
+PROFILE_LABELS = {key: label for _, fields in PROFILE_FORM for key, label, *_ in fields}
+PROFILE_MAX_CHARS = 2000   # per field
+MAX_SAVED_ANSWERS = 200
+
+FACTS = [  # (label pattern, profile key); first match wins, so specific patterns go first
+    (r"preferred (first |full )?name|name you.d prefer|prefer(red)? us to use", "preferred_name"),
     (r"first name", "first_name"),
     (r"last name|surname|family name", "last_name"),
     (r"^full name|^name$|legal name", "full_name"),
@@ -574,18 +674,47 @@ FACTS = [  # (label pattern, profile key); first match wins
     (r"phone|mobile", "phone"),
     (r"linkedin", "linkedin"),
     (r"github", "github"),
+    (r"twitter|^x$", "twitter"),
     (r"website|portfolio|personal (site|url)", "website"),
     (r"pronoun", "pronouns"),
-    (r"authori[sz]ed to work|legally (authorized|eligible|able) to work|work authori[sz]ation|eligible to work", "work_authorized"),
-    (r"sponsor", "needs_sponsorship"),
+    (r"without (company |employer )?sponsor", "authorized_without_sponsorship"),
+    (r"(what|which|type of) (sponsorship|support)|sponsorship would you require|list the type", "sponsorship_type"),
+    (r"sponsor|sponorship|immigration (support|case)|visa", "needs_sponsorship"),
+    (r"authori[sz]ed to work|legally (authorized|eligible|able|work authorized) to work|work authori[sz]ation|eligible to work", "work_authorized"),
+    (r"u\.?s\.? person|export control", "us_person"),
+    (r"cuba|iran|north korea|syria|crimea", "sanctioned_country"),
+    (r"citizenship", "citizenship"),
+    (r"18 years", "over_18"),
+    (r"clearance", "clearance"),
+    (r"government official", "gov_relative_or_official"),
+    (r"government|military|state.owned", "gov_employee"),
+    (r"non.?compete|non.?solicit|post.employment restriction|agreements? with (a |your )?(current|former)|bound by any agreement", "restrictive_agreement"),
+    (r"contact your (current )?employer", "contact_employer"),
+    (r"(current|previous|recent|last).{0,20}(employer|company)|where have you (most recently )?worked", "current_company"),
+    (r"(current|previous|recent).{0,20}(job )?title", "current_title"),
+    (r"how many years", "years_experience"),
+    (r"strongest (coding|programming) language", "strongest_language"),
+    (r"city and state", "location"),
+    (r"work remotely|remote location", "work_setup"),
+    (r"in.?office|on.?site|hybrid|days (a|per) week|commut|office location|in.?person|work from (the|our) office", "in_office"),
+    (r"(located|based|live|reside) in (the )?(us|u\.s\.?|united states)\b", "us_resident"),
     (r"relocat", "relocate"),
-    (r"in.?office|on.?site|hybrid|days (a|per) week|commut", "in_office"),
+    (r"address", "address"),
+    (r"zip|postal", "zip"),
+    (r"u\.?s\.? state|what state|state/region|state or province", "state"),
+    (r"country", "country"),
     (r"where are you (currently )?(located|based)|current (location|city)|^location|city", "location"),
-    (r"^country", "country"),
-    (r"hear about|how did you (find|learn)|referr", "heard_about"),
+    (r"hear about|how did you (find|learn)|learned about", "heard_about"),
     # "Start date year" belongs to an education entry, not to when Sai can start
-    (r"start date(?! (year|month))|earliest.*start|when (can|could) you start|available to start|notice period", "start_date"),
+    (r"start date(?! (year|month))|earliest.*start|when (can|could) you start|available to start|start (a new role|full.time|working)|notice period", "start_date"),
     (r"salary|compensation|pay expectation", "salary"),
+    (r"deadline|timeline consideration", "deadlines"),
+    (r"(describe|need|any).{0,40}accommodation|adjustments we can make", "accommodations"),
+    (r"whatsapp|text messages|stay up to date|receive alerts|newsletter|opt.in", "marketing_opt_in"),
+    (r"undergrad.{0,15}gpa|gpa.{0,5}undergrad", "undergrad_gpa"),
+    (r"gpa(?!.{0,5}doctora)", "gpa"),
+    (r"\bgre\b", "gre_score"),
+    (r"what (school|university|college)", "school"),
     (r"graduat", "graduation"),
     (r"^degree|degree (type|level)|highest degree", "degree"),
     (r"discipline|major|field of study", "discipline"),
@@ -593,33 +722,88 @@ FACTS = [  # (label pattern, profile key); first match wins
     (r"education", "education"),
 ]
 FALLBACK = {"preferred_name": "first_name"}  # used when the first key is empty
+EEO_KEYS = [(r"gender|sex\b", "gender"), (r"hispanic|latino", "hispanic"), (r"race|ethnic", "race"),
+            (r"veteran", "veteran"), (r"disabilit", "disability")]
 EEO_RE = re.compile(r"gender|race|ethnic|hispanic|latino|veteran|disabilit|sexual orientation|transgender", re.I)
 LEGAL_RE = re.compile(r"agree|acknowledg|consent|arbitrat|attest|\bi (hereby )?certify|privacy|policy|"
-                      r"terms (and|&) conditions|signature|"
+                      r"terms (and|&) conditions|signature|redact|add another|review the linked|"
                       r"confirm that|read the|understand that", re.I)
-PAST_RE = re.compile(r"(previously|before|ever|past).{0,30}(work|interview|appl|employ)", re.I)
+PAST_RE = re.compile(r"(previously|before|ever|past).{0,40}(work|interview|appl|employ|consult|engaged)|"
+                     r"(employ|work|engaged).{0,80}(in the past|before\b|previously)|current or former .{0,40}employee", re.I)
+FOLLOWUP_RE = re.compile(r"^(\[optional[^\]]*\] )?(if (you|yes|so|other|\"|'|“|applicable)|please (specify|explain|provide additional))", re.I)
 OPEN_RE = re.compile(r"^(why|what|how|tell|describe|share|explain|briefly|please (describe|share|tell|explain))|\?\s*$", re.I)
 
 
-def answer_for(label, fields, profile):
+LINK_KEYS = {"linkedin", "github", "twitter", "website"}
+
+
+def fits_options(value, options):
+    """Whether a profile value picks one of a question's choices, matched like the
+    autofill script does: same words, or one starting with the other."""
+    v = norm_label(value)
+    return any(o == v or o.startswith(v + " ") or v.startswith(o + " ")
+               for o in map(norm_label, options) if o)
+
+
+def in_list(company, text):
+    names = [norm_label(n) for n in str(text or "").split(",")]
+    c = norm_label(company)
+    return bool(c) and any(n and (n == c or n in c.split() or c in n.split()) for n in names)
+
+
+def saved_answer(label, profile):
+    """Sai's own answer to this question, written in the Profile form."""
+    key = norm_label(label)
+    for item in profile.get("answers") or []:
+        q = norm_label(item.get("q", ""))
+        if q and (q == key or (len(q) > 25 and (q in key or key in q))):
+            return str(item.get("a", "")).strip()
+    return ""
+
+
+def answer_for(label, fields, profile, company=""):
     """Classify one form question and fill what can be filled from profile.json."""
     ftypes = {f.get("type", "") for f in fields}
     options = [v.get("label", "") for f in fields for v in f.get("values") or []]
+    mine = saved_answer(label, profile)
+    if mine and "input_file" not in ftypes:
+        return {"kind": "fact", "a": mine, "options": options}
     if "input_file" in ftypes or re.search(r"resume|\bcv\b|cover letter", label, re.I):
         if re.search(r"cover letter", label, re.I):
             return {"kind": "draft"}
         return {"kind": "file", "a": "Attach your resume PDF."}
     if EEO_RE.search(label):
+        for pat, key in EEO_KEYS:
+            if re.search(pat, label, re.I) and profile.get(key):
+                if options and not fits_options(profile[key], options):
+                    break
+                return {"kind": "fact", "a": str(profile[key]), "options": options}  # Sai chose to share it
         return {"kind": "eeo", "a": "Voluntary. Your choice."}
     if LEGAL_RE.search(label):
         return {"kind": "legal", "a": "Read this and answer it yourself."}
-    if PAST_RE.search(label):
+    if FOLLOWUP_RE.search(label):  # "If you answered Yes, ..." depends on another answer
+        return {"kind": "you", "a": "Answer this yourself if it applies.", "options": options}
+    about_them = company and re.search(re.escape(company.split()[0]) + r"|\b(us|our company)\b", label, re.I)
+    if PAST_RE.search(label) and about_them:
+        key = "past_interviews" if re.search(r"interview|appl", label, re.I) else "past_employers"
+        if str(profile.get(key, "")).strip():  # "None" counts as filled in
+            return {"kind": "fact", "a": "Yes" if in_list(company, profile[key]) else "No", "options": options}
+        return {"kind": "you", "field": key,
+                "a": "Fill in the company lists in the Profile tab, or answer this yourself."}
+    if PAST_RE.search(label) and not re.search(r"government|military|state.owned", label, re.I):
         return {"kind": "you", "a": "Answer this yourself."}
     for pat, key in FACTS:
         if re.search(pat, label, re.I):
+            if key in LINK_KEYS and len(label) > 60:
+                continue  # "Share a project ... (personal, portfolio or ...)" is a question, not a link
+            if key == "gov_relative_or_official":
+                key = "gov_relative" if re.search(r"relative", label, re.I) else "gov_official"
             value = str(profile.get(key) or profile.get(FALLBACK.get(key, ""), "")).strip()
             if not value:
-                return {"kind": "you", "a": f"Add \"{key}\" to profile.json, or answer this yourself."}
+                return {"kind": "you", "field": key,
+                        "a": f"Fill in \"{PROFILE_LABELS.get(key, key)}\" in the Profile tab, or answer this yourself."}
+            if options and not fits_options(value, options):
+                return {"kind": "you", "a": f"Your answer ({value}) isn't one of the choices.", "options": options}
             return {"kind": "fact", "a": value, "options": options}
     if OPEN_RE.search(label) and ("textarea" in ftypes or not options):
         return {"kind": "draft"}
@@ -633,9 +817,34 @@ def standard_questions(profile):
     return [{"label": l, "required": True, "fields": []} for l in labels]
 
 
+ASHBY_FORM_QUERY = """query ApiJobPosting($organizationHostedJobsPageName: String!, $jobPostingId: String!) {
+ jobPosting(organizationHostedJobsPageName: $organizationHostedJobsPageName, jobPostingId: $jobPostingId) {
+  applicationForm { sections { fieldEntries { ... on FormFieldEntry { isRequired field } } } } } }"""
+ASHBY_TYPES = {"File": "input_file", "LongText": "textarea"}
+
+
+def ashby_questions(token, native):
+    """The questions on an Ashby application form, shaped like Greenhouse's."""
+    data = get_json("https://jobs.ashbyhq.com/api/non-user-graphql?op=ApiJobPosting",
+                    {"operationName": "ApiJobPosting", "query": ASHBY_FORM_QUERY,
+                     "variables": {"organizationHostedJobsPageName": urllib.parse.unquote(token),
+                                   "jobPostingId": native}})
+    posting = (data.get("data") or {}).get("jobPosting") or {}
+    out = []
+    for section in (posting.get("applicationForm") or {}).get("sections") or []:
+        for entry in section.get("fieldEntries") or []:
+            f = entry.get("field") or {}
+            values = [{"label": v.get("label", "")} for v in f.get("selectableValues") or []]
+            if f.get("type") == "Boolean":
+                values = [{"label": "Yes"}, {"label": "No"}]
+            out.append({"label": f.get("title") or "", "required": bool(entry.get("isRequired")),
+                        "fields": [{"type": ASHBY_TYPES.get(f.get("type"), "input_text"), "values": values}]})
+    return out
+
+
 def prepare(job, profile, resume, is_busy, model, max_drafts=3):
-    """Build the list of answers for one job. Greenhouse publishes the form's questions;
-    for Lever and Ashby, use the usual fields plus one open answer."""
+    """Build the list of answers for one job. Greenhouse and Ashby publish the form's
+    questions; for the others, use the usual fields plus one open answer."""
     ats, token, native = job["id"].split(":", 2)
     questions, note = [], ""
     if ats == "greenhouse":
@@ -645,6 +854,11 @@ def prepare(job, profile, resume, is_busy, model, max_drafts=3):
             questions += data.get("location_questions") or []
             if data.get("compliance"):
                 note = "The form also has voluntary demographic questions."
+        except Exception as e:
+            note = f"Could not load the form's questions ({e})."
+    if ats == "ashby":
+        try:
+            questions = ashby_questions(token, native)
         except Exception as e:
             note = f"Could not load the form's questions ({e})."
     if not questions:
@@ -657,7 +871,7 @@ def prepare(job, profile, resume, is_busy, model, max_drafts=3):
         label = html_to_text(q.get("label", "")).strip()
         if re.fullmatch(r"(?i)latitude|longitude", label):
             continue  # hidden fields the form fills from the location box
-        a = answer_for(label, q.get("fields") or [], profile)
+        a = answer_for(label, q.get("fields") or [], profile, job["company"])
         if a["kind"] == "draft":
             if drafted < max_drafts:
                 a["a"] = draft_answer(job, label, resume, is_busy, model)
@@ -898,10 +1112,69 @@ def summary():
     }
 
 
+def refresh_answers(job, profile):
+    """Stored answers with every non-draft one worked out again from the current profile,
+    so changes in the Profile tab show up in jobs prepared before them."""
+    out = []
+    for a in job.get("answers") or []:
+        if a["kind"] != "draft":
+            fields = [{"type": "input_file" if a["kind"] == "file" else "",
+                       "values": [{"label": o} for o in a.get("options") or []]}]
+            a = {"q": a["q"], "required": a.get("required", False),
+                 **answer_for(a["q"], fields, profile, job["company"])}
+        out.append(a)
+    return out
+
+
 def detail(job_id):
     with db_lock:
         job = load_db()["jobs"].get(job_id)
-    return job and {**job, "apply_url": apply_url(job)}
+    if not job:
+        return None
+    if job.get("answers") is not None:
+        job["answers"] = refresh_answers(job, load_json(JOBS_DIR / "profile.json", {}))
+    return {**job, "apply_url": apply_url(job)}
+
+
+def profile_form():
+    """The Profile tab: the form, Sai's answers so far, and the questions from prepared
+    jobs that still need him, most common first."""
+    profile = load_json(JOBS_DIR / "profile.json", {})
+    with db_lock:
+        jobs = [j for j in load_db()["jobs"].values() if j.get("answers")]
+    open_q = {}
+    for job in jobs:
+        for a in refresh_answers(job, profile):
+            if a["kind"] != "you" or a.get("field") or FOLLOWUP_RE.search(a["q"]):
+                continue
+            item = open_q.setdefault(norm_label(a["q"]), {"q": a["q"], "jobs": 0, "companies": set(),
+                                                          "options": a.get("options") or []})
+            item["jobs"] += 1
+            item["companies"].add(job["company"])
+    unanswered = sorted(open_q.values(), key=lambda x: (-x["jobs"], x["q"]))[:80]
+    for item in unanswered:
+        item["companies"] = sorted(item["companies"])[:5]
+    return {"form": [{"section": name, "fields": [{"key": k, "label": l, "choices": c, "help": h}
+                                                   for k, l, c, h in fields]}
+                     for name, fields in PROFILE_FORM],
+            "profile": {k: v for k, v in profile.items() if k in PROFILE_KEYS},
+            "answers": profile.get("answers") or [],
+            "unanswered": unanswered, "prepared_jobs": len(jobs)}
+
+
+def save_profile(values, answers):
+    """Save the Profile tab. Keys outside the form are kept as they were."""
+    profile = load_json(JOBS_DIR / "profile.json", {})
+    for key, value in values.items():
+        if key in PROFILE_KEYS:
+            profile[key] = str(value)[:PROFILE_MAX_CHARS].strip()
+    kept = []
+    for item in answers[:MAX_SAVED_ANSWERS]:
+        q, a = str(item.get("q", ""))[:500].strip(), str(item.get("a", ""))[:PROFILE_MAX_CHARS].strip()
+        if q and a:
+            kept.append({"q": q, "a": a})
+    profile["answers"] = kept
+    save_json(JOBS_DIR / "profile.json", profile)
 
 
 def apply_url(job):
@@ -965,7 +1238,8 @@ def fill(page_url, fields):
         a = stored.get(norm_label(label))
         if not (a and a.get("a") and a["kind"] in ("fact", "draft")):
             a = answer_for(label, [{"type": "input_file" if ftype == "file" else ftype,
-                                    "values": [{"label": o} for o in options]}], profile)
+                                    "values": [{"label": o} for o in options]}], profile,
+                           (job or {}).get("company", ""))
             if a["kind"] == "draft":  # reuse a prepared draft only for a question like it
                 fits = spare_drafts and re.search(r"why|interest|cover letter|motivat", label, re.I)
                 a = spare_drafts.pop(0) if fits else {"kind": "you"}

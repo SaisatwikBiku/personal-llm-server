@@ -619,6 +619,26 @@ def jobs_prepare(body: JobIn, request: Request):
     return {"ok": True}
 
 
+class ProfileIn(BaseModel):
+    values: dict[str, str]
+    answers: list[dict] = []
+
+
+@app.get("/api/jobs/profile")
+def jobs_profile(request: Request):
+    check_user(request)
+    return jobs.profile_form()
+
+
+@app.put("/api/jobs/profile")
+def jobs_profile_save(body: ProfileIn, request: Request):
+    check_user(request)
+    if len(body.values) > 200 or len(body.answers) > jobs.MAX_SAVED_ANSWERS:
+        raise HTTPException(400, "Too many fields")
+    jobs.save_profile(body.values, body.answers)
+    return {"ok": True}
+
+
 class FillIn(BaseModel):
     url: str
     fields: list[dict]
@@ -937,6 +957,14 @@ input{font:inherit;font-size:16px;color:var(--fg);background:var(--card);border:
 .ans{margin:0 0 10px}
 .q{font-size:13px;font-weight:600}
 .ans .ghost{margin-top:4px}
+.psec{margin:18px 0 6px;font-size:15px}
+.pfield{margin:0 0 12px}
+.pfield label{display:block;font-size:13px;font-weight:600;margin-bottom:4px}
+.pfield select,.pfield textarea{font:inherit;font-size:16px;color:var(--fg);background:var(--card);border:1px solid var(--line);border-radius:8px;padding:9px;width:100%}
+.pfield textarea{min-height:64px;resize:vertical}
+.pfield .thought{margin-top:3px}
+.pfield.empty label::after{content:" \2022 empty";color:var(--deny);font-weight:400}
+#psave{position:sticky;bottom:0;background:var(--bg);padding:10px 0;border-top:1px solid var(--line);display:flex;gap:8px;align-items:center}
 .applylink{display:inline-block;background:var(--accent);color:#fff;text-decoration:none;border-radius:8px;padding:9px 14px;margin-bottom:10px}
 </style></head><body>
 <header>
@@ -944,7 +972,7 @@ input{font:inherit;font-size:16px;color:var(--fg);background:var(--card);border:
   <span id="status">connecting</span>
   <span><button class="ghost" id="alerts" style="display:none">Alerts</button></span>
 </header>
-<nav id="tabs"><button data-view="chat">Chat</button><button data-view="log">Tasks</button><button data-view="jobs">Jobs</button><button data-view="memory">Memory</button></nav>
+<nav id="tabs"><button data-view="chat">Chat</button><button data-view="log">Tasks</button><button data-view="jobs">Jobs</button><button data-view="memory">Memory</button><button data-view="profile">Profile</button></nav>
 <div id="chat" class="view">
   <div class="jbar">
     <select id="chatpick" aria-label="Conversation" style="flex:1;min-width:0"></select>
@@ -961,6 +989,11 @@ input{font:inherit;font-size:16px;color:var(--fg);background:var(--card);border:
   <p class="hint" style="margin-top:0">Facts the assistant knows about you, one per line. They go at the start of every chat and task, so keep them short. In a chat, "remember that ..." adds one.</p>
   <textarea id="memtext" spellcheck="false"></textarea>
   <div class="jbar" style="margin-top:8px"><span class="hint" id="memcount" style="flex:1"></span><button class="approve" id="memsave" style="flex:none">Save</button></div>
+</div>
+<div id="profile" class="view">
+  <p class="hint" style="margin-top:0">Everything application forms ask for, gathered from the questions on the forms of the jobs found so far. The autofill script and the prepared answers use it. Legal consents are never answered for you.</p>
+  <div id="pform"></div>
+  <div id="psave"><span class="hint" id="pstat" style="flex:1"></span><button class="approve" id="psavebtn" style="flex:none">Save</button></div>
 </div>
 <div id="jobs" class="view">
   <div class="jbar">
@@ -1078,9 +1111,9 @@ async function setupAlerts(){
     } catch (e) { alert("Could not turn on alerts: " + e); }
   };
 }
-const KIND = {fact: "from profile.json", draft: "draft by the local model, check every claim",
+const KIND = {fact: "from your profile", draft: "draft by the local model, check every claim",
   legal: "read and answer yourself", you: "needs you", file: "attach", eeo: "voluntary"};
-const VIEWS = ["chat", "log", "jobs", "memory"];
+const VIEWS = ["chat", "log", "jobs", "memory", "profile"];
 let view = "", jobsSig = "", openJob = null, openBody = null;
 function showView(v){
   if (!VIEWS.includes(v)) v = "chat";
@@ -1094,6 +1127,7 @@ function showView(v){
   try { localStorage.setItem("view", v); } catch (e) {}
   if (v === "jobs") { jobsSig = ""; loadJobs(); }
   if (v === "memory") loadMemory();
+  if (v === "profile") loadProfile();
   if (v === "chat" && !chatLoaded) { chatLoaded = true; loadChatList(); openChat(chatId); }
 }
 
@@ -1288,6 +1322,74 @@ $("memsave").onclick = async () => {
   setTimeout(() => { $("memsave").textContent = "Save"; }, 1500);
 };
 for (const b of $("tabs").children) b.onclick = () => showView(b.dataset.view);
+
+// ---------- application profile ----------
+let profileDirty = false;
+function pInput(value, choices, multi){
+  let input;
+  if (choices) {
+    input = el("select");
+    const opts = [""].concat(choices);
+    if (value && !choices.includes(value)) opts.push(value);
+    for (const c of opts) { const o = el("option", null, c || "Choose"); o.value = c; input.append(o); }
+  } else if (multi) input = el("textarea");
+  else { input = el("input"); input.autocomplete = "off"; }
+  input.value = value || "";
+  return input;
+}
+function pField(label, input, help){
+  const f = el("div", "pfield" + (input.value ? "" : " empty"));
+  const l = el("label", null, label);
+  f.append(l, input);
+  if (help) f.append(el("div", "thought", help));
+  input.addEventListener("input", () => { profileDirty = true; f.classList.toggle("empty", !input.value.trim()); $("pstat").textContent = "Unsaved changes"; });
+  return f;
+}
+async function loadProfile(){
+  if (profileDirty) return;
+  let p;
+  try { const r = await fetch("api/jobs/profile"); if (!r.ok) return; p = await r.json(); } catch (e) { return; }
+  const box = $("pform");
+  box.replaceChildren();
+  let empty = 0, total = 0;
+  for (const sec of p.form) {
+    box.append(el("h3", "psec", sec.section));
+    for (const f of sec.fields) {
+      const input = pInput(p.profile[f.key], f.choices, false);
+      input.dataset.key = f.key;
+      total++; if (!input.value) empty++;
+      box.append(pField(f.label, input, f.help));
+    }
+  }
+  box.append(el("h3", "psec", "Questions it still can't answer"));
+  box.append(el("div", "hint", p.unanswered.length
+    ? "From the " + p.prepared_jobs + " jobs with prepared answers, most common first. Answer once and it's used on every form that asks. Leave empty to skip."
+    : "None right now. Questions show up here as jobs get prepared."));
+  for (const u of p.unanswered) {
+    const input = pInput("", u.options.length && u.options.length <= 12 ? u.options : null, !u.options.length);
+    input.dataset.q = u.q;
+    const where = u.jobs + (u.jobs === 1 ? " job" : " jobs") + ": " + u.companies.join(", ");
+    box.append(pField(u.q, input, where + (u.options.length > 12 ? ". Choices include " + u.options.slice(0, 6).join(", ") : "")));
+  }
+  box.append(el("h3", "psec", "Your saved answers"));
+  if (!p.answers.length) box.append(el("div", "hint", "None yet. Clear one to remove it."));
+  for (const a of p.answers) {
+    const input = pInput(a.a, null, true);
+    input.dataset.q = a.q;
+    box.append(pField(a.q, input, ""));
+  }
+  $("pstat").textContent = empty ? empty + " of " + total + " fields empty" : "Every field filled in";
+}
+$("psavebtn").onclick = async () => {
+  const values = {}, answers = [];
+  for (const i of $("pform").querySelectorAll("[data-key]")) values[i.dataset.key] = i.value.trim();
+  for (const i of $("pform").querySelectorAll("[data-q]")) if (i.value.trim()) answers.push({q: i.dataset.q, a: i.value.trim()});
+  const r = await fetch("api/jobs/profile", {method: "PUT", headers: {"Content-Type": "application/json"}, body: JSON.stringify({values, answers})});
+  if (!r.ok) { const t = await r.json().catch(() => ({})); alert(t.detail || ("Error " + r.status)); return; }
+  profileDirty = false;
+  $("pstat").textContent = "Saved";
+  loadProfile();
+};
 function jobsMeta(s){
   const p = s.progress, lr = s.last_run;
   if (p.running) return "Running: " + p.step + (p.total ? " (" + p.done + "/" + p.total + ")" : "");
