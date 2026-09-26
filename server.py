@@ -863,7 +863,7 @@ def chat_send(body: ChatIn, request: Request):
             fact = " ".join(remembered.group(1).split())
             mem = load_memory()
             if len(mem) + len(fact) + 3 > MEMORY_MAX_CHARS:
-                reply = "Memory is full. Remove something in the Memory tab first."
+                reply = "Memory is full. Remove something under You > Memory first."
             else:
                 save_memory(f"{mem}\n- {fact}")
                 reply = f"Saved to memory: {fact}"
@@ -957,8 +957,8 @@ MANIFEST = json.dumps({
     "start_url": "/",
     "scope": "/",
     "display": "standalone",
-    "background_color": "#151513",
-    "theme_color": "#151513",
+    "background_color": "#0b0b10",
+    "theme_color": "#0b0b10",
 })
 
 SERVICE_WORKER = """
@@ -984,214 +984,501 @@ self.addEventListener("notificationclick", event => {
 PAGE = r"""<!doctype html>
 <html lang="en"><head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
 <meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="Agent">
+<meta name="theme-color" content="#0b0b10">
 <link rel="manifest" href="manifest.json">
 <title>Agent</title>
 <style>
-:root{--bg:#f5f4f0;--fg:#1d1c1a;--muted:#6d6b65;--card:#fff;--line:#dfddd6;--accent:#2f6f4f;--deny:#a3392b;--code:#eeede7}
-@media (prefers-color-scheme: dark){:root{--bg:#151513;--fg:#ebeae4;--muted:#9b9992;--card:#1f1e1c;--line:#33322e;--accent:#57a37a;--deny:#cf5f4e;--code:#292825}}
+:root{
+  --bg:#f5f5f9;--surface:#ffffff;--surface2:#f0f0f6;--raise:#ffffffcc;--line:#e3e3ec;--line2:#d4d4e0;
+  --fg:#16161d;--muted:#6c6c7e;--faint:#9a9aab;
+  --accent:#6a4cff;--accent2:#0ea5c6;--accent-fg:#fff;--accent-soft:#6a4cff14;
+  --good:#12a150;--good-soft:#12a15016;--warn:#c97a06;--warn-soft:#c97a0618;--bad:#d9303e;--bad-soft:#d9303e14;
+  --code:#f0f0f6;--shadow:0 1px 2px #0000000a,0 8px 24px #00000010;--ring-track:#e6e6ef;
+  --r:14px;--r-sm:10px;
+}
+@media (prefers-color-scheme: dark){:root:not([data-theme="light"]){
+  --bg:#0b0b10;--surface:#13131b;--surface2:#1a1a24;--raise:#17172199;--line:#252532;--line2:#31313f;
+  --fg:#ececf4;--muted:#9090a4;--faint:#63637a;
+  --accent:#8b73ff;--accent2:#22d3ee;--accent-soft:#8b73ff1f;
+  --good:#34d17c;--good-soft:#34d17c1a;--warn:#f3a93c;--warn-soft:#f3a93c1a;--bad:#ff5d6c;--bad-soft:#ff5d6c1a;
+  --code:#1d1d28;--shadow:0 1px 2px #0006,0 12px 32px #0007;--ring-track:#262634;
+}}
+:root[data-theme="dark"]{
+  --bg:#0b0b10;--surface:#13131b;--surface2:#1a1a24;--raise:#17172199;--line:#252532;--line2:#31313f;
+  --fg:#ececf4;--muted:#9090a4;--faint:#63637a;
+  --accent:#8b73ff;--accent2:#22d3ee;--accent-soft:#8b73ff1f;
+  --good:#34d17c;--good-soft:#34d17c1a;--warn:#f3a93c;--warn-soft:#f3a93c1a;--bad:#ff5d6c;--bad-soft:#ff5d6c1a;
+  --code:#1d1d28;--shadow:0 1px 2px #0006,0 12px 32px #0007;--ring-track:#262634;
+}
 *{box-sizing:border-box}
 html,body{margin:0;height:100%}
-body{background:var(--bg);color:var(--fg);font:15px/1.45 -apple-system,system-ui,"Segoe UI",sans-serif;display:flex;flex-direction:column;padding-top:env(safe-area-inset-top,0px)}
-header{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:10px 14px;border-bottom:1px solid var(--line)}
-header strong{font-size:16px}
-#status{font-size:13px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:55vw}
-nav{display:flex;border-bottom:1px solid var(--line)}
-nav button{flex:1;background:transparent;color:var(--muted);border-radius:0;padding:9px 4px;font-size:14px;border-bottom:2px solid transparent}
-nav button.on{color:var(--fg);border-bottom-color:var(--accent);font-weight:600}
-.view{display:none;flex:1;overflow-y:auto;padding:12px 14px;-webkit-overflow-scrolling:touch}
-.view.on{display:block}
-#msgs{display:flex;flex-direction:column;gap:8px}
-.msg{white-space:pre-wrap;word-break:break-word;padding:8px 11px;border-radius:12px;max-width:92%}
-.msg.user{background:var(--accent);color:#fff;align-self:flex-end}
-.msg.assistant{background:var(--card);border:1px solid var(--line);align-self:flex-start}
+body{background:var(--bg);color:var(--fg);font:15px/1.5 -apple-system,BlinkMacSystemFont,"SF Pro Text",Inter,"Segoe UI",system-ui,sans-serif;-webkit-font-smoothing:antialiased;overflow:hidden}
+body::before{content:"";position:fixed;inset:-20%;z-index:-1;pointer-events:none;
+  background:radial-gradient(40% 35% at 12% 8%,color-mix(in srgb,var(--accent) 22%,transparent),transparent 70%),
+             radial-gradient(35% 30% at 92% 96%,color-mix(in srgb,var(--accent2) 16%,transparent),transparent 70%)}
+button,input,select,textarea{font:inherit;color:inherit}
+button{cursor:pointer;border:0;background:none}
+a{color:inherit}
+svg{width:18px;height:18px;flex:none;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
+.sr{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0)}
+
+/* ---------- shell ---------- */
+#app{display:grid;grid-template-columns:236px minmax(0,1fr);height:100dvh}
+#rail{display:flex;flex-direction:column;gap:4px;padding:18px 12px;border-right:1px solid var(--line);background:var(--raise);backdrop-filter:blur(18px)}
+.brand{display:flex;align-items:center;gap:10px;padding:4px 10px 18px;font-weight:700;font-size:17px;letter-spacing:-.01em}
+.logo{width:28px;height:28px;border-radius:9px;background:linear-gradient(135deg,var(--accent),var(--accent2));display:grid;place-items:center;box-shadow:0 4px 14px color-mix(in srgb,var(--accent) 40%,transparent)}
+.logo svg{width:16px;height:16px;stroke:#fff;stroke-width:2.2}
+.nav{display:flex;align-items:center;gap:12px;padding:9px 12px;border-radius:10px;color:var(--muted);font-weight:550;text-align:left;width:100%;position:relative;transition:background .15s,color .15s}
+.nav:hover{background:var(--surface2);color:var(--fg)}
+.nav.on{background:var(--accent-soft);color:var(--fg)}
+.nav.on svg{color:var(--accent)}
+.badge{margin-left:auto;min-width:20px;height:20px;padding:0 6px;border-radius:10px;background:var(--accent);color:var(--accent-fg);font-size:11.5px;font-weight:700;display:none;align-items:center;justify-content:center;font-variant-numeric:tabular-nums}
+.badge.on{display:inline-flex}
+.badge.warn{background:var(--warn)}
+.rail-foot{margin-top:auto;display:flex;flex-direction:column;gap:8px;padding:10px 4px 0}
+.status{display:flex;align-items:center;gap:8px;font-size:12.5px;color:var(--muted);min-width:0}
+.status span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.dot{width:8px;height:8px;border-radius:50%;background:var(--faint);flex:none}
+.dot.idle{background:var(--good);box-shadow:0 0 0 3px var(--good-soft)}
+.dot.busy{background:var(--accent);box-shadow:0 0 0 3px var(--accent-soft);animation:pulse 1.4s infinite}
+.dot.wait{background:var(--warn);box-shadow:0 0 0 3px var(--warn-soft);animation:pulse 1.4s infinite}
+.dot.off{background:var(--bad)}
+@keyframes pulse{50%{opacity:.45}}
+#topbar{display:none}
+#tabbar{display:none}
+main{min-width:0;min-height:0;position:relative}
+.view{display:none;flex-direction:column;height:100%;min-height:0}
+.view.on{display:flex}
+.vhead{display:flex;align-items:center;gap:10px;padding:18px 24px 12px;flex-wrap:wrap}
+.vhead h1{font-size:22px;letter-spacing:-.02em;margin:0;font-weight:700}
+.vhead .sub{color:var(--muted);font-size:13px;width:100%;margin-top:-4px}
+.spacer{flex:1}
+.vbody{flex:1;min-height:0;overflow-y:auto;padding:4px 24px 24px;-webkit-overflow-scrolling:touch}
+
+/* ---------- controls ---------- */
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:7px;height:36px;padding:0 14px;border-radius:10px;font-weight:600;font-size:14px;white-space:nowrap;transition:transform .08s,background .15s,opacity .15s;text-decoration:none}
+.btn:active{transform:scale(.97)}
+.btn:disabled{opacity:.5;cursor:default}
+.btn.primary{background:linear-gradient(135deg,var(--accent),color-mix(in srgb,var(--accent) 70%,var(--accent2)));color:var(--accent-fg);box-shadow:0 4px 14px color-mix(in srgb,var(--accent) 30%,transparent)}
+.btn.good{background:var(--good);color:#fff}
+.btn.danger{background:var(--bad-soft);color:var(--bad)}
+.btn.ghost{background:var(--surface);border:1px solid var(--line);color:var(--fg)}
+.btn.ghost:hover{border-color:var(--line2)}
+.btn.icon{width:36px;padding:0}
+.btn.sm{height:30px;padding:0 10px;font-size:13px;border-radius:8px}
+.btn.block{width:100%}
+.seg{display:inline-flex;background:var(--surface2);border:1px solid var(--line);border-radius:11px;padding:3px;gap:2px}
+.seg button{height:28px;padding:0 11px;border-radius:8px;font-size:13px;font-weight:600;color:var(--muted);display:inline-flex;align-items:center;gap:6px;white-space:nowrap}
+.seg button.on{background:var(--surface);color:var(--fg);box-shadow:var(--shadow)}
+.seg .n{font-size:11px;color:var(--faint);font-variant-numeric:tabular-nums}
+.seg button.on .n{color:var(--accent)}
+.scrollx{overflow-x:auto;scrollbar-width:none;max-width:100%}
+.scrollx::-webkit-scrollbar{display:none}
+.field{display:block;margin:0 0 14px}
+.field>label,.flabel{display:block;font-size:13px;font-weight:600;margin-bottom:6px}
+.help{font-size:12.5px;color:var(--muted);margin-top:5px}
+.inp,textarea.inp,select.inp{width:100%;background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:10px 12px;font-size:15px;outline:none;transition:border-color .15s,box-shadow .15s}
+.inp:focus{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-soft)}
+textarea.inp{min-height:84px;resize:vertical;line-height:1.45}
+select.inp{appearance:none;background-image:linear-gradient(45deg,transparent 50%,var(--muted) 50%),linear-gradient(135deg,var(--muted) 50%,transparent 50%);background-position:calc(100% - 17px) 55%,calc(100% - 12px) 55%;background-size:5px 5px;background-repeat:no-repeat;padding-right:32px}
+.need .inp{border-color:color-mix(in srgb,var(--warn) 70%,var(--line));background:color-mix(in srgb,var(--warn) 5%,var(--surface))}
+.card{background:var(--surface);border:1px solid var(--line);border-radius:var(--r);padding:16px;box-shadow:var(--shadow)}
+.chip{display:inline-flex;align-items:center;gap:5px;height:24px;padding:0 9px;border-radius:12px;font-size:12px;font-weight:600;background:var(--surface2);color:var(--muted);white-space:nowrap}
+.chip.good{background:var(--good-soft);color:var(--good)}
+.chip.bad{background:var(--bad-soft);color:var(--bad)}
+.chip.warn{background:var(--warn-soft);color:var(--warn)}
+.chip.acc{background:var(--accent-soft);color:var(--accent)}
+.chips{display:flex;flex-wrap:wrap;gap:6px}
+.muted{color:var(--muted)}
+.small{font-size:13px}
+.empty{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px;text-align:center;color:var(--muted);padding:56px 20px}
+.empty svg{width:40px;height:40px;stroke-width:1.3;color:var(--faint)}
+.empty b{color:var(--fg);font-size:16px}
+pre{background:var(--code);padding:10px 12px;border-radius:10px;white-space:pre-wrap;word-break:break-word;font:12.5px/1.5 ui-monospace,"SF Mono",Menlo,Consolas,monospace;margin:8px 0 0;max-height:360px;overflow:auto}
+code{font:13px ui-monospace,"SF Mono",Menlo,Consolas,monospace;background:var(--code);padding:1px 5px;border-radius:5px}
+details>summary{cursor:pointer;list-style:none;display:flex;align-items:center;gap:8px;font-weight:600;font-size:14px;padding:6px 0;user-select:none}
+details>summary::-webkit-details-marker{display:none}
+details>summary::before{content:"";width:7px;height:7px;border-right:2px solid var(--muted);border-bottom:2px solid var(--muted);transform:rotate(-45deg);transition:transform .15s;margin:0 3px}
+details[open]>summary::before{transform:rotate(45deg)}
+#toast{position:fixed;left:50%;bottom:28px;transform:translate(-50%,20px);background:var(--fg);color:var(--bg);padding:10px 16px;border-radius:12px;font-size:14px;font-weight:600;opacity:0;pointer-events:none;transition:all .2s;z-index:60;max-width:calc(100vw - 32px)}
+#toast.on{opacity:1;transform:translate(-50%,0)}
+#toast.bad{background:var(--bad);color:#fff}
+#banner{display:none;position:fixed;top:14px;left:50%;transform:translateX(-50%);z-index:50;background:var(--warn);color:#111;border-radius:12px;padding:9px 14px;font-weight:650;font-size:14px;box-shadow:var(--shadow);align-items:center;gap:8px}
+#banner.on{display:flex}
+
+/* ---------- chat ---------- */
+#v-chat{flex-direction:row}
+.chatside{width:260px;border-right:1px solid var(--line);display:flex;flex-direction:column;min-height:0}
+.chatside .vhead{padding-bottom:8px}
+#chatlist{flex:1;overflow-y:auto;padding:0 10px 12px}
+.citem{display:block;width:100%;text-align:left;padding:9px 12px;border-radius:10px;color:var(--muted);font-size:14px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.citem:hover{background:var(--surface2);color:var(--fg)}
+.citem.on{background:var(--accent-soft);color:var(--fg);font-weight:600}
+.chatmain{flex:1;display:flex;flex-direction:column;min-width:0;min-height:0}
+#chatpick{display:none;max-width:48vw}
+#msgs{flex:1;overflow-y:auto;padding:8px 24px 16px;display:flex;flex-direction:column;gap:14px}
+.msgwrap{width:100%;max-width:780px;margin:0 auto;display:flex;flex-direction:column;gap:14px}
+.msg{white-space:pre-wrap;word-break:break-word;padding:11px 15px;border-radius:18px;max-width:86%;line-height:1.55}
+.msg.user{align-self:flex-end;background:linear-gradient(135deg,var(--accent),color-mix(in srgb,var(--accent) 75%,var(--accent2)));color:#fff;border-bottom-right-radius:6px}
+.msg.assistant{align-self:flex-start;background:var(--surface);border:1px solid var(--line);border-bottom-left-radius:6px;box-shadow:var(--shadow)}
 .msg.typing{color:var(--muted)}
-.msg.err{color:var(--deny)}
-.msg pre{margin:6px 0}
-.msg code{font:13px ui-monospace,Menlo,Consolas,monospace;background:var(--code);padding:1px 4px;border-radius:4px}
-.hint{color:var(--muted);font-size:13px}
-#files{display:none;flex-wrap:wrap;gap:6px;padding:8px 14px 0;border-top:1px solid var(--line)}
-#files.on{display:flex}
-#files + footer{border-top:0}
-.chip{display:flex;align-items:center;gap:6px;font-size:13px;background:var(--card);border:1px solid var(--line);border-radius:8px;padding:4px 4px 4px 8px;max-width:100%}
-.chip span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.chip button{padding:2px 7px;background:transparent;color:var(--muted);font-size:15px;line-height:1}
-#attach{padding:0 12px;font-size:20px;line-height:1}
-.msg .files{font-size:12px;opacity:.85;margin-top:4px}
-#memtext{font:14px/1.45 ui-monospace,Menlo,Consolas,monospace;color:var(--fg);background:var(--card);border:1px solid var(--line);border-radius:8px;padding:10px;width:100%;min-height:45vh;resize:vertical}
-.ev{margin:0 0 10px}
-.task{font-weight:600;margin-top:14px}
-.thought{color:var(--muted);font-size:13px}
-.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:10px}
-.tool{font-size:13px;color:var(--muted)}
-pre{background:var(--code);padding:8px;border-radius:6px;white-space:pre-wrap;word-break:break-word;font:12px/1.4 ui-monospace,Menlo,Consolas,monospace;margin:6px 0 0;max-height:320px;overflow:auto}
-.answer{border-left:3px solid var(--accent);padding:2px 0 2px 10px;white-space:pre-wrap}
-.err{color:var(--deny);font-size:14px}
-details summary{cursor:pointer;color:var(--muted);font-size:13px}
-#pending{display:none;border-top:2px solid var(--accent);background:var(--card);padding:12px 14px}
-.btns{display:flex;gap:8px;margin-top:10px}
-button{font:inherit;border:0;border-radius:8px;padding:11px 14px;cursor:pointer}
-.approve{background:var(--accent);color:#fff;flex:1}
-.deny{background:var(--deny);color:#fff;flex:1}
-.ghost{background:transparent;color:var(--muted);border:1px solid var(--line);padding:6px 10px;font-size:13px}
-footer{display:flex;gap:8px;padding:10px 14px calc(10px + env(safe-area-inset-bottom,0px));border-top:1px solid var(--line)}
-input{font:inherit;font-size:16px;color:var(--fg);background:var(--card);border:1px solid var(--line);border-radius:8px;padding:10px;width:100%}
-#send{background:var(--accent);color:#fff}
-.jbar{display:flex;gap:8px;align-items:center;margin-bottom:10px}
-.jbar a.ghost{text-decoration:none;border-radius:8px;margin-left:auto}
-.jbar select{font:inherit;font-size:13px;color:var(--fg);background:var(--card);border:1px solid var(--line);border-radius:8px;padding:5px 6px}
-#jmeta{font-size:13px;color:var(--muted);margin-bottom:10px}
-.job{margin-bottom:10px;cursor:pointer}
-.jtop{display:flex;gap:8px;align-items:baseline}
-.score{font-size:12px;font-weight:600;border-radius:6px;padding:1px 6px;background:var(--code);color:var(--muted);flex:none}
-.score.strong{background:var(--accent);color:#fff}
-.score.good{border:1px solid var(--accent);color:var(--accent)}
-.flags{display:flex;flex-wrap:wrap;gap:6px;margin:4px 0}
-.flag{font-size:12px;border:1px solid var(--line);border-radius:6px;padding:0 6px;color:var(--muted)}
-.flag.no{border-color:var(--deny);color:var(--deny)}
-.flag.yes{border-color:var(--accent);color:var(--accent)}
-.jbody{cursor:auto}
-.jbody:not(:empty){margin-top:10px;border-top:1px solid var(--line);padding-top:10px}
-.ans{margin:0 0 10px}
-.q{font-size:13px;font-weight:600}
-.ans .ghost{margin-top:4px}
-.psec{margin:18px 0 6px;font-size:15px}
-.pfield{margin:0 0 12px}
-.pfield label{display:block;font-size:13px;font-weight:600;margin-bottom:4px}
-.pfield select,.pfield textarea{font:inherit;font-size:16px;color:var(--fg);background:var(--card);border:1px solid var(--line);border-radius:8px;padding:9px;width:100%}
-.pfield textarea{min-height:64px;resize:vertical}
-.pfield .thought{margin-top:3px}
-.pfield.empty label::after{content:" \2022 empty";color:var(--deny);font-weight:400}
-#psave{position:sticky;bottom:0;background:var(--bg);padding:10px 0;border-top:1px solid var(--line);display:flex;gap:8px;align-items:center}
-.flag.kind-interview,.flag.kind-verification{border-color:var(--accent);color:var(--accent)}
-.flag.kind-rejection{border-color:var(--deny);color:var(--deny)}
-.code{font:600 22px ui-monospace,Menlo,Consolas,monospace;letter-spacing:2px;margin:6px 0}
-.setup input{margin-top:8px}
-.rv{margin:0 0 12px}
-.rv textarea,.rv select,.rv input{font:inherit;font-size:15px;color:var(--fg);background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:8px;width:100%;margin-top:4px}
-.rv textarea{min-height:60px;resize:vertical}
-.rv.need textarea,.rv.need input,.rv.need select{border-color:var(--deny)}
-.applylink{display:inline-block;background:var(--accent);color:#fff;text-decoration:none;border-radius:8px;padding:9px 14px;margin-bottom:10px}
+.msg.typing::after{content:"";display:inline-block;width:6px;height:6px;border-radius:50%;background:var(--accent);margin-left:8px;animation:pulse 1s infinite}
+.msg.err{color:var(--bad)}
+.msg pre{margin:8px 0}
+.msg .files{font-size:12px;opacity:.85;margin-top:6px}
+.hello{margin:auto;text-align:center;max-width:460px;color:var(--muted);padding:40px 10px}
+.hello .logo{width:52px;height:52px;border-radius:16px;margin:0 auto 16px}
+.hello .logo svg{width:26px;height:26px}
+.hello h2{color:var(--fg);margin:0 0 6px;font-size:22px;letter-spacing:-.02em}
+.suggest{display:flex;flex-wrap:wrap;gap:8px;justify-content:center;margin-top:18px}
+.suggest button{border:1px solid var(--line);background:var(--surface);border-radius:12px;padding:8px 12px;font-size:13.5px;color:var(--fg)}
+.suggest button:hover{border-color:var(--accent)}
+.composer{padding:10px 24px calc(14px + env(safe-area-inset-bottom,0px))}
+.cbox{max-width:780px;margin:0 auto;background:var(--surface);border:1px solid var(--line);border-radius:18px;padding:8px;box-shadow:var(--shadow);transition:border-color .15s,box-shadow .15s}
+.cbox:focus-within{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-soft),var(--shadow)}
+.cfiles{display:none;flex-wrap:wrap;gap:6px;padding:2px 2px 8px}
+.cfiles.on{display:flex}
+.fchip{display:flex;align-items:center;gap:6px;font-size:12.5px;background:var(--surface2);border-radius:9px;padding:4px 4px 4px 10px;max-width:100%}
+.fchip span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.fchip button{width:22px;height:22px;border-radius:6px;color:var(--muted);font-size:16px;line-height:1}
+.fchip button:hover{background:var(--line)}
+.crow{display:flex;align-items:flex-end;gap:6px}
+.crow textarea{flex:1;border:0;outline:0;background:transparent;resize:none;padding:8px 6px;font-size:15.5px;line-height:1.45;max-height:200px;min-height:40px}
+.cbtn{width:38px;height:38px;border-radius:12px;display:grid;place-items:center;color:var(--muted);flex:none}
+.cbtn:hover{background:var(--surface2);color:var(--fg)}
+.cbtn.send{background:var(--accent);color:#fff}
+.cbtn.send:hover{background:var(--accent);filter:brightness(1.08)}
+.cbtn.send.stop{background:var(--bad)}
+.chint{max-width:780px;margin:6px auto 0;font-size:11.5px;color:var(--faint);text-align:center}
+
+/* ---------- jobs ---------- */
+.stats{display:flex;gap:10px;flex-wrap:wrap;width:100%}
+.stat{flex:1;min-width:110px;background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:10px 14px;box-shadow:var(--shadow);text-align:left;transition:border-color .15s}
+.stat:hover{border-color:var(--line2)}
+.stat b{display:block;font-size:22px;letter-spacing:-.02em;font-variant-numeric:tabular-nums}
+.stat span{font-size:12px;color:var(--muted);font-weight:600}
+.stat.hl b{background:linear-gradient(135deg,var(--accent),var(--accent2));-webkit-background-clip:text;background-clip:text;color:transparent}
+#japply .short{display:none}
+@media (max-width: 860px){#japply .short{display:inline}}
+.jbar{display:flex;align-items:center;gap:8px;padding:0 24px 10px;flex-wrap:wrap}
+#jmeta{font-size:12.5px;color:var(--muted);padding:0 24px 8px}
+.jsplit{flex:1;min-height:0;display:grid;grid-template-columns:minmax(300px,420px) minmax(0,1fr);border-top:1px solid var(--line)}
+#jlist{overflow-y:auto;padding:12px;border-right:1px solid var(--line);display:flex;flex-direction:column;gap:8px}
+.jrow{display:flex;gap:12px;align-items:flex-start;padding:12px;border-radius:12px;border:1px solid transparent;cursor:pointer;text-align:left;width:100%;transition:background .12s,border-color .12s}
+.jrow:hover{background:var(--surface2)}
+.jrow.on{background:var(--surface);border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-soft)}
+.ring{--p:0;--c:var(--muted);width:42px;height:42px;border-radius:50%;flex:none;display:grid;place-items:center;font-size:13px;font-weight:750;font-variant-numeric:tabular-nums;
+  background:radial-gradient(closest-side,var(--surface) 76%,transparent 78% 100%),conic-gradient(var(--c) calc(var(--p)*1%),var(--ring-track) 0)}
+.jrow:hover .ring,.jrow.on .ring{background:radial-gradient(closest-side,var(--surface) 76%,transparent 78% 100%),conic-gradient(var(--c) calc(var(--p)*1%),var(--ring-track) 0)}
+.ring.strong{--c:var(--good)}
+.ring.good{--c:var(--accent)}
+.ring.big{width:58px;height:58px;font-size:17px}
+.jinfo{min-width:0;flex:1}
+.jt{font-weight:650;line-height:1.3;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.jm{font-size:13px;color:var(--muted);margin:2px 0 6px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#jdetail{overflow-y:auto;min-width:0;position:relative;display:flex;flex-direction:column}
+.jd{padding:22px 26px 0;max-width:860px;width:100%}
+.jdh{display:flex;gap:16px;align-items:flex-start}
+.jdh h2{margin:0;font-size:21px;line-height:1.25;letter-spacing:-.02em}
+.jdh .jm{white-space:normal;margin:4px 0 0;font-size:14px}
+.jback{display:none}
+.jsum{color:var(--muted);margin:14px 0 10px}
+.skills{margin:10px 0 4px}
+.actions{display:flex;gap:8px;flex-wrap:wrap;margin:16px 0 6px}
+.sec{margin:22px 0 6px}
+.sech{display:flex;align-items:center;gap:8px;font-size:13px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);margin-bottom:10px}
+.sech .chip{text-transform:none;letter-spacing:0}
+.q{padding:12px 14px;border:1px solid var(--line);border-radius:12px;background:var(--surface);margin-bottom:8px}
+.q .ql{font-size:14px;font-weight:600;line-height:1.4}
+.q .qk{font-size:12px;color:var(--muted);margin:2px 0 8px}
+.q .qa{white-space:pre-wrap;word-break:break-word;font-size:14px;margin-top:6px}
+.q .req{color:var(--warn);font-weight:700}
+.q.need{border-color:color-mix(in srgb,var(--warn) 45%,var(--line))}
+.consent{display:flex;gap:10px;align-items:flex-start;cursor:pointer}
+.consent input{width:20px;height:20px;accent-color:var(--accent);margin-top:1px;flex:none}
+.stickyfoot{position:sticky;bottom:0;margin-top:auto;padding:12px 26px calc(12px + env(safe-area-inset-bottom,0px));background:linear-gradient(to top,var(--bg) 70%,transparent);display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.stickyfoot .left{font-size:13px;color:var(--muted);flex:1;min-width:140px}
+.mail{padding:14px;border:1px solid var(--line);border-radius:12px;background:var(--surface);margin-bottom:8px;box-shadow:var(--shadow)}
+.mail .mt{font-weight:650;margin:6px 0 2px}
+.mail .code{font:700 26px ui-monospace,"SF Mono",Menlo,monospace;letter-spacing:4px;margin:8px 0}
+
+/* ---------- tasks ---------- */
+#events{max-width:860px;margin:0 auto;width:100%}
+.ev{position:relative;padding:0 0 14px 22px;border-left:2px solid var(--line);margin-left:6px}
+.ev::before{content:"";position:absolute;left:-6px;top:4px;width:10px;height:10px;border-radius:50%;background:var(--line2)}
+.ev.task{border-left-color:transparent;padding-top:10px}
+.ev.task::before{background:var(--accent);box-shadow:0 0 0 4px var(--accent-soft)}
+.ev.task .tt{font-weight:700;font-size:15px}
+.ev.answer::before{background:var(--good)}
+.ev.err::before{background:var(--bad)}
+.ev .thought{color:var(--muted);font-size:13.5px}
+.ev .tool{font-size:12.5px;font-weight:650;color:var(--accent)}
+.ev .ans{background:var(--surface);border:1px solid var(--line);border-left:3px solid var(--good);border-radius:10px;padding:10px 14px;white-space:pre-wrap;box-shadow:var(--shadow)}
+.ev .bad{color:var(--bad);font-size:14px}
+#pending{display:none;max-width:860px;margin:0 auto 14px;width:100%;border:1px solid var(--warn);background:color-mix(in srgb,var(--warn) 6%,var(--surface))}
+#pending.on{display:block}
+
+/* ---------- you ---------- */
+.youwrap{max-width:900px;margin:0 auto;width:100%}
+.progress{height:8px;border-radius:4px;background:var(--surface2);overflow:hidden;margin:8px 0 4px}
+.progress i{display:block;height:100%;background:linear-gradient(90deg,var(--accent),var(--accent2));border-radius:4px;transition:width .3s}
+.pgrid{display:grid;grid-template-columns:1fr 1fr;gap:0 16px}
+.pgrid .wide{grid-column:1/-1}
+.psec{scroll-margin-top:12px}
+.psec h3{font-size:16px;margin:26px 0 12px;letter-spacing:-.01em;display:flex;align-items:center;gap:8px}
+.pfield.empty>label::after{content:"empty";margin-left:8px;font-size:11px;font-weight:600;color:var(--warn);background:var(--warn-soft);padding:1px 7px;border-radius:8px}
+.savebar{position:sticky;bottom:0;display:flex;align-items:center;gap:10px;padding:12px 0 calc(12px + env(safe-area-inset-bottom,0px));background:linear-gradient(to top,var(--bg) 75%,transparent);margin-top:10px}
+#memtext{min-height:50vh;font:14px/1.55 ui-monospace,"SF Mono",Menlo,Consolas,monospace}
+
+/* ---------- phone ---------- */
+@media (max-width: 860px){
+  #app{grid-template-columns:1fr;grid-template-rows:auto minmax(0,1fr) auto}
+  #rail{display:none}
+  #topbar{display:flex;align-items:center;gap:10px;padding:calc(10px + env(safe-area-inset-top,0px)) 16px 8px;border-bottom:1px solid var(--line);background:var(--raise);backdrop-filter:blur(18px)}
+  #topbar .brand{padding:0;font-size:16px}
+  #topbar .status{margin-left:auto;max-width:48vw}
+  #tabbar{display:flex;border-top:1px solid var(--line);background:var(--raise);backdrop-filter:blur(18px);padding:6px 4px calc(6px + env(safe-area-inset-bottom,0px))}
+  #tabbar .nav{flex-direction:column;gap:3px;padding:6px 2px;font-size:11px;justify-content:center;border-radius:12px}
+  #tabbar .nav.on{background:none;color:var(--accent)}
+  #tabbar .badge{position:absolute;top:0;left:calc(50% + 6px);margin:0;height:17px;min-width:17px;font-size:10.5px;padding:0 5px}
+  .vhead{padding:14px 16px 10px}
+  .vhead h1{font-size:20px}
+  .vbody{padding:4px 16px 20px}
+  .chatside{display:none}
+  #chatpick{display:block;flex:1;min-width:0;max-width:none}
+  #chattitle{display:none}
+  #msgs{padding:8px 14px 12px}
+  .msg{max-width:92%}
+  .composer{padding:8px 10px 10px}
+  .chint{display:none}
+  .jbar,#jmeta{padding-left:16px;padding-right:16px}
+  #v-jobs .vhead{flex-wrap:nowrap}
+  #japply .long{display:none}
+  .stats{gap:8px}
+  .stat{min-width:0;padding:8px 10px}
+  .stat b{font-size:19px}
+  .jsplit{grid-template-columns:1fr}
+  #jlist{border-right:0;padding:10px}
+  #jdetail{position:fixed;inset:0;z-index:40;background:var(--bg);transform:translateX(100%);transition:transform .22s ease;padding-top:env(safe-area-inset-top,0px)}
+  #v-jobs.detail #jdetail{transform:none}
+  .jback{display:inline-flex}
+  .jd{padding:12px 16px 0}
+  .stickyfoot{padding:10px 16px calc(10px + env(safe-area-inset-bottom,0px))}
+  .pgrid{grid-template-columns:1fr}
+  #banner{top:calc(8px + env(safe-area-inset-top,0px))}
+  #toast{bottom:calc(84px + env(safe-area-inset-bottom,0px))}
+}
 </style></head><body>
-<header>
-  <strong>Agent</strong>
-  <span id="status">connecting</span>
-  <span><button class="ghost" id="alerts" style="display:none">Alerts</button></span>
-</header>
-<nav id="tabs"><button data-view="chat">Chat</button><button data-view="log">Tasks</button><button data-view="jobs">Jobs</button><button data-view="memory">Memory</button><button data-view="profile">Profile</button></nav>
-<div id="chat" class="view">
-  <div class="jbar">
-    <select id="chatpick" aria-label="Conversation" style="flex:1;min-width:0"></select>
-    <select id="chatmodel" aria-label="Model"><option value="better">8B, better</option><option value="faster">4B, faster</option></select>
-    <button class="ghost" id="chatdel">Delete</button>
-  </div>
-  <div id="msgs"></div>
+<div id="app">
+  <aside id="rail">
+    <div class="brand"><div class="logo"><svg viewBox="0 0 24 24"><path d="M12 3l2.4 5.6L20 11l-5.6 2.4L12 19l-2.4-5.6L4 11l5.6-2.4z"/></svg></div>Agent</div>
+    <div id="navs"></div>
+    <div class="rail-foot">
+      <button class="btn ghost sm" id="alerts" style="display:none"></button>
+      <button class="btn ghost sm" id="theme" title="Switch theme"></button>
+      <div class="status"><i class="dot" id="dot"></i><span id="status">connecting</span></div>
+    </div>
+  </aside>
+  <header id="topbar">
+    <div class="brand"><div class="logo"><svg viewBox="0 0 24 24"><path d="M12 3l2.4 5.6L20 11l-5.6 2.4L12 19l-2.4-5.6L4 11l5.6-2.4z"/></svg></div>Agent</div>
+    <div class="status"><i class="dot" id="dot2"></i><span id="status2">connecting</span></div>
+  </header>
+  <main>
+    <!-- chat -->
+    <section id="v-chat" class="view">
+      <div class="chatside">
+        <div class="vhead"><h1>Chats</h1><span class="spacer"></span><button class="btn icon ghost" id="newchat" title="New chat" aria-label="New chat"><svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg></button></div>
+        <div id="chatlist"></div>
+      </div>
+      <div class="chatmain">
+        <div class="vhead">
+          <select class="inp" id="chatpick" aria-label="Conversation" style="width:auto;height:36px;padding:0 30px 0 10px;font-size:14px"></select>
+          <h1 id="chattitle" style="font-size:17px;font-weight:650;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:50%"></h1>
+          <span class="spacer"></span>
+          <div class="seg" id="chatmodel"><button data-m="better">8B · smart</button><button data-m="faster">4B · fast</button></div>
+          <button class="btn icon ghost" id="chatdel" title="Delete chat" aria-label="Delete chat"><svg viewBox="0 0 24 24"><path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13"/></svg></button>
+        </div>
+        <div id="msgs"><div class="msgwrap" id="msgwrap"></div></div>
+        <div class="composer">
+          <div class="cbox">
+            <div class="cfiles" id="c-files"></div>
+            <div class="crow">
+              <button class="cbtn" id="c-attach" title="Attach files" aria-label="Attach files"><svg viewBox="0 0 24 24"><path d="M21 11.5l-8.6 8.6a5 5 0 01-7-7l8.6-8.6a3.5 3.5 0 015 5l-8.6 8.6a2 2 0 01-2.8-2.8l7.9-7.9"/></svg></button>
+              <textarea id="c-input" rows="1" placeholder="Message the agent" enterkeyhint="send"></textarea>
+              <button class="cbtn send" id="c-send" title="Send" aria-label="Send"><svg viewBox="0 0 24 24"><path d="M5 12h14M13 6l6 6-6 6"/></svg></button>
+            </div>
+          </div>
+          <div class="chint">Runs on your server, offline. Say "remember that ..." to save a fact. Shift+Enter for a new line.</div>
+        </div>
+      </div>
+    </section>
+
+    <!-- jobs -->
+    <section id="v-jobs" class="view">
+      <div class="vhead">
+        <h1>Jobs</h1><span class="spacer"></span>
+        <a class="btn primary" id="japply" target="_blank" rel="noopener noreferrer" style="display:none"><svg viewBox="0 0 24 24"><path d="M5 12h14M13 6l6 6-6 6"/></svg><span class="long"></span><span class="short"></span></a>
+        <button class="btn ghost icon" id="jrun" title="Run the search now" aria-label="Run the search now"><svg viewBox="0 0 24 24"><path d="M20 12a8 8 0 11-2.3-5.7M20 4v5h-5"/></svg></button>
+        <a class="btn ghost icon" id="jsetup" href="jobs-fill.user.js" title="Install the autofill script" aria-label="Install the autofill script"><svg viewBox="0 0 24 24"><path d="M12 4v11M7 10l5 5 5-5M5 20h14"/></svg></a>
+      </div>
+      <div class="jbar"><div class="stats" id="jstats"></div></div>
+      <div class="jbar"><div class="scrollx"><div class="seg" id="jfilter"></div></div></div>
+      <div id="jmeta"></div>
+      <div class="jsplit">
+        <div id="jlist"></div>
+        <div id="jdetail"></div>
+      </div>
+    </section>
+
+    <!-- inbox -->
+    <section id="v-inbox" class="view">
+      <div class="vhead"><h1>Inbox</h1><span class="spacer"></span>
+        <button class="btn ghost sm" id="icheck" style="display:none">Check now</button>
+        <button class="btn danger sm" id="ioff" style="display:none">Disconnect</button>
+        <div class="sub" id="imeta"></div>
+      </div>
+      <div class="jbar" id="ifilterbar" style="display:none"><div class="scrollx"><div class="seg" id="ifilter"></div></div></div>
+      <div class="vbody"><div class="youwrap" id="ibody"></div></div>
+    </section>
+
+    <!-- tasks -->
+    <section id="v-tasks" class="view">
+      <div class="vhead"><h1>Tasks</h1><span class="spacer"></span>
+        <button class="btn danger sm" id="stop">Stop</button>
+        <button class="btn ghost sm" id="clear">Clear</button>
+        <div class="sub">The agent runs commands in its sandbox. Anything with side effects waits for your approval.</div>
+      </div>
+      <div class="vbody">
+        <div class="card" id="pending">
+          <div style="display:flex;align-items:center;gap:8px;font-weight:700"><svg viewBox="0 0 24 24" style="color:var(--warn)"><path d="M12 9v4M12 17h.01M10.3 3.9L2 18a2 2 0 001.7 3h16.6a2 2 0 001.7-3L13.7 3.9a2 2 0 00-3.4 0z"/></svg>Approve this action?</div>
+          <div id="pbody"></div>
+          <input class="inp" id="reason" placeholder="Reason if denying (optional)" style="margin-top:10px">
+          <div style="display:flex;gap:8px;margin-top:10px"><button class="btn danger" id="deny" style="flex:1">Deny</button><button class="btn good" id="approve" style="flex:1">Approve</button></div>
+        </div>
+        <div id="events"></div>
+      </div>
+      <div class="composer">
+        <div class="cbox">
+          <div class="cfiles" id="t-files"></div>
+          <div class="crow">
+            <button class="cbtn" id="t-attach" title="Attach files" aria-label="Attach files"><svg viewBox="0 0 24 24"><path d="M21 11.5l-8.6 8.6a5 5 0 01-7-7l8.6-8.6a3.5 3.5 0 015 5l-8.6 8.6a2 2 0 01-2.8-2.8l7.9-7.9"/></svg></button>
+            <textarea id="t-input" rows="1" placeholder="Give the agent a task" enterkeyhint="send"></textarea>
+            <button class="cbtn send" id="t-send" title="Run" aria-label="Run"><svg viewBox="0 0 24 24"><path d="M5 12h14M13 6l6 6-6 6"/></svg></button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- you -->
+    <section id="v-you" class="view">
+      <div class="vhead"><h1>You</h1><span class="spacer"></span>
+        <div class="seg" id="yousub"><button data-s="profile">Application profile</button><button data-s="memory">Memory</button></div>
+      </div>
+      <div class="vbody">
+        <div class="youwrap" id="y-profile">
+          <div class="card" style="margin-bottom:6px">
+            <div style="display:flex;align-items:baseline;gap:8px"><b>Profile</b><span class="muted small" id="pstat"></span></div>
+            <div class="progress"><i id="pbar" style="width:0"></i></div>
+            <div class="muted small">Everything application forms ask for, built from the questions on real forms. The autofill and the prepared answers use it. Consents are never answered from here.</div>
+            <div class="scrollx" style="margin-top:12px"><div class="chips" id="pjump" style="flex-wrap:nowrap"></div></div>
+          </div>
+          <div id="pform"></div>
+          <div class="savebar"><span class="muted small" id="pdirty" style="flex:1"></span><button class="btn primary" id="psave">Save profile</button></div>
+        </div>
+        <div class="youwrap" id="y-memory" style="display:none">
+          <div class="muted small" style="margin-bottom:10px">Facts the assistant knows about you, one per line. They go at the start of every chat and task, so keep them short. In a chat, "remember that ..." adds one.</div>
+          <textarea class="inp" id="memtext" spellcheck="false"></textarea>
+          <div class="savebar"><span class="muted small" id="memcount" style="flex:1"></span><button class="btn primary" id="memsave">Save memory</button></div>
+        </div>
+      </div>
+    </section>
+  </main>
+  <nav id="tabbar"></nav>
 </div>
-<div id="log" class="view">
-  <div class="jbar"><span class="hint" style="flex:1">Tasks run commands on the server, with your approval.</span><button class="ghost" id="clear">Clear</button><button class="ghost" id="stop">Stop</button></div>
-  <div id="events"></div>
-</div>
-<div id="memory" class="view">
-  <p class="hint" style="margin-top:0">Facts the assistant knows about you, one per line. They go at the start of every chat and task, so keep them short. In a chat, "remember that ..." adds one.</p>
-  <textarea id="memtext" spellcheck="false"></textarea>
-  <div class="jbar" style="margin-top:8px"><span class="hint" id="memcount" style="flex:1"></span><button class="approve" id="memsave" style="flex:none">Save</button></div>
-</div>
-<div id="profile" class="view">
-  <p class="hint" style="margin-top:0">Everything application forms ask for, gathered from the questions on the forms of the jobs found so far. The autofill script and the prepared answers use it. Legal consents are never answered for you.</p>
-  <div id="pform"></div>
-  <div id="psave"><span class="hint" id="pstat" style="flex:1"></span><button class="approve" id="psavebtn" style="flex:none">Save</button></div>
-</div>
-<div id="jobs" class="view">
-  <div class="jbar">
-    <select id="jfilter"><option value="review">Review</option><option value="approved">Approved</option><option value="new">New</option><option value="applied">Applied</option><option value="interview">Interviewing</option><option value="rejected">Rejected</option><option value="skipped">Skipped</option><option value="all">All</option><option value="emails">Emails</option></select>
-    <button class="ghost" id="jrun">Run now</button>
-    <a class="approve" id="japply" target="_blank" rel="noopener noreferrer" style="display:none;text-decoration:none;border-radius:8px;padding:6px 10px;font-size:13px"></a>
-    <a class="ghost" id="jsetup" href="jobs-fill.user.js">Autofill script</a>
-  </div>
-  <div id="jmeta"></div>
-  <div id="jlist"></div>
-</div>
-<div id="pending">
-  <strong>Approve this action?</strong>
-  <div id="pbody"></div>
-  <input id="reason" placeholder="Reason if denying (optional)" style="margin-top:8px">
-  <div class="btns"><button class="deny" id="deny">Deny</button><button class="approve" id="approve">Approve</button></div>
-</div>
-<div id="files"></div>
-<footer>
-  <button class="ghost" id="attach" aria-label="Attach files" title="Attach files">+</button>
-  <input type="file" id="filepick" multiple hidden>
-  <input id="task" placeholder="Give the agent a task" autocomplete="off" enterkeyhint="send">
-  <button id="send">Send</button>
-</footer>
+<input type="file" id="filepick" multiple hidden>
+<div id="banner" role="button" tabindex="0"><svg viewBox="0 0 24 24"><path d="M12 9v4M12 17h.01M10.3 3.9L2 18a2 2 0 001.7 3h16.6a2 2 0 001.7-3L13.7 3.9a2 2 0 00-3.4 0z"/></svg><span>The agent is waiting for your approval</span></div>
+<div id="toast"></div>
 <script>
+// Everything on this page is built with DOM calls and textContent, never innerHTML:
+// model output and email text are untrusted.
 const $ = id => document.getElementById(id);
-let last = 0, pendingId = null;
-function el(tag, cls, text){ const e = document.createElement(tag); if (cls) e.className = cls; if (text !== undefined) e.textContent = text; return e; }
+function el(tag, cls, text){ const e = document.createElement(tag); if (cls) e.className = cls; if (text !== undefined && text !== null) e.textContent = text; return e; }
 function pre(text){ return el("pre", null, text); }
-function render(ev){
-  const box = el("div", "ev");
-  if (ev.kind === "task") box.append(el("div", "task", "You: " + ev.text));
-  else if (ev.kind === "thought") box.append(el("div", "thought", "Step " + ev.step + " (" + ev.stats + "): " + ev.text));
-  else if (ev.kind === "action") {
-    const c = el("div", "card");
-    c.append(el("div", "tool", ev.tool + (ev.auto ? " (auto-approved, read-only)" : "")), pre(ev.arg));
-    if (ev.content) c.append(pre(ev.content));
-    box.append(c);
-  }
-  else if (ev.kind === "result") { const d = el("details"); d.append(el("summary", null, "Result"), pre(ev.text)); box.append(d); }
-  else if (ev.kind === "rejected") box.append(el("div", "err", "Denied" + (ev.text ? ": " + ev.text : "")));
-  else if (ev.kind === "answer") box.append(el("div", "answer", ev.text));
-  else box.append(el("div", "err", ev.text));
-  $("events").append(box);
-}
-async function poll(){
-  try {
-    const r = await fetch("api/state?since=" + last);
-    if (!r.ok) { $("status").textContent = "error " + r.status; return; }
-    const s = await r.json();
-    if (s.seq < last) { last = 0; $("events").replaceChildren(); return poll(); }
-    const log = $("log");
-    const nearBottom = log.scrollHeight - log.scrollTop - log.clientHeight < 80;
-    for (const e of s.events) { render(e); last = Math.max(last, e.n); }
-    $("status").textContent = s.status + (s.task ? " \u00b7 " + s.task : "");
-    const p = s.pending;
-    if (p && p.id !== pendingId) {
-      pendingId = p.id;
-      const b = $("pbody");
-      b.replaceChildren(el("div", "tool", p.tool), pre(p.arg));
-      if (p.content) b.append(pre(p.content));
-      $("reason").value = "";
-      $("pending").style.display = "block";
-      log.scrollTop = log.scrollHeight;
-    }
-    if (!p) { pendingId = null; $("pending").style.display = "none"; }
-    if (s.events.length && nearBottom) log.scrollTop = log.scrollHeight;
-  } catch (e) { $("status").textContent = "offline"; }
-}
-async function post(path, body){
-  const r = await fetch(path, {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body || {})});
-  if (!r.ok) { const t = await r.json().catch(() => ({})); alert(t.detail || ("Error " + r.status)); }
-  poll();
-}
-$("send").onclick = () => {
-  if (view === "chat" && chatAbort) { chatAbort.abort(); return; }
-  const t = $("task").value.trim();
-  if (!t && !attached.length) return;
-  if (attached.some(f => f.reading)) { alert("Still reading a file."); return; }
-  const files = attached.map(f => ({name: f.name, text: f.text}));
-  $("task").value = "";
-  attached = [];
-  renderFiles();
-  if (view === "chat") sendChat(t, files); else post("api/task", {task: t, files});
+const SVGNS = "http://www.w3.org/2000/svg";
+const ICONS = {
+  chat: "M21 12a8 8 0 01-11.6 7.1L4 20l1-4.6A8 8 0 1121 12z",
+  jobs: "M4 8h16v11H4zM9 8V5h6v3M4 13h16",
+  inbox: "M4 13l2.5-8h11L20 13v6H4zM4 13h5l1 2h4l1-2h5",
+  tasks: "M5 7l2 2 4-4M5 17l2 2 4-4M14 7h6M14 17h6",
+  you: "M12 12a4 4 0 100-8 4 4 0 000 8zM4 21a8 8 0 0116 0",
+  back: "M15 18l-6-6 6-6", send: "M5 12h14M13 6l6 6-6 6", ext: "M14 4h6v6M20 4l-9 9M18 14v5H5V6h5", copy: "M8 8h11v11H8zM5 16V5h11",
+  check: "M5 12l5 5 9-10", x: "M6 6l12 12M18 6L6 18", mail: "M3 6h18v12H3zM3 7l9 6 9-6",
+  sparkle: "M12 3l2.4 5.6L20 11l-5.6 2.4L12 19l-2.4-5.6L4 11l5.6-2.4z", sun: "M12 17a5 5 0 100-10 5 5 0 000 10zM12 1v2M12 21v2M4.2 4.2l1.4 1.4M18.4 18.4l1.4 1.4M1 12h2M21 12h2M4.2 19.8l1.4-1.4M18.4 5.6l1.4-1.4",
+  moon: "M21 12.8A9 9 0 1111.2 3a7 7 0 009.8 9.8z", bell: "M6 8a6 6 0 1112 0c0 7 3 9 3 9H3s3-2 3-9M10 21h4",
 };
-$("task").addEventListener("keydown", e => { if (e.key === "Enter") $("send").click(); });
-$("approve").onclick = () => { if (pendingId) { const id = pendingId; pendingId = "sent"; post("api/decision", {id: id, approve: true}); } };
-$("deny").onclick = () => { if (pendingId) { const id = pendingId; pendingId = "sent"; post("api/decision", {id: id, approve: false, reason: $("reason").value}); } };
-$("stop").onclick = () => post("api/stop");
-$("clear").onclick = () => { post("api/clear").then(() => { last = 0; $("events").replaceChildren(); }); };
+function icon(name){ const s = document.createElementNS(SVGNS, "svg"); s.setAttribute("viewBox", "0 0 24 24"); const p = document.createElementNS(SVGNS, "path"); p.setAttribute("d", ICONS[name]); s.append(p); return s; }
+let toastTimer;
+function toast(msg, bad){ const t = $("toast"); t.textContent = msg; t.className = "on" + (bad ? " bad" : ""); clearTimeout(toastTimer); toastTimer = setTimeout(() => { t.className = ""; }, bad ? 5000 : 2600); }
+async function api(path, opts){
+  const r = await fetch(path, opts);
+  if (!r.ok) { const t = await r.json().catch(() => ({})); throw new Error(t.detail || ("Error " + r.status)); }
+  return r.json().catch(() => ({}));
+}
+const send = (path, method, body) => api(path, {method, headers: {"Content-Type": "application/json"}, body: JSON.stringify(body || {})});
+function when(iso){ return iso ? new Date(iso).toLocaleString([], {month: "short", day: "numeric", hour: "numeric", minute: "2-digit"}) : ""; }
+function store(k, v){ try { if (v === undefined) return localStorage.getItem(k); localStorage.setItem(k, v); } catch (e) { return null; } }
+
+// ---------- navigation ----------
+const VIEWS = [["chat", "Chat"], ["jobs", "Jobs"], ["inbox", "Inbox"], ["tasks", "Tasks"], ["you", "You"]];
+const OLD = {log: "tasks", memory: "you", profile: "you"};
+let view = "";
+for (const holder of [$("navs"), $("tabbar")]) {
+  for (const [v, label] of VIEWS) {
+    const b = el("button", "nav");
+    b.dataset.view = v;
+    b.append(icon(v), el("span", null, label), el("span", "badge"));
+    b.onclick = () => showView(v);
+    holder.append(b);
+  }
+}
+function badge(v, n, warn){
+  for (const b of document.querySelectorAll('.nav[data-view="' + v + '"] .badge')) {
+    b.textContent = n > 99 ? "99+" : String(n);
+    b.classList.toggle("on", n > 0);
+    b.classList.toggle("warn", !!warn);
+  }
+}
+function showView(v){
+  v = OLD[v] || v;
+  if (!VIEWS.some(x => x[0] === v)) v = "chat";
+  view = v;
+  for (const [name] of VIEWS) $("v-" + name).classList.toggle("on", name === v);
+  for (const b of document.querySelectorAll(".nav")) b.classList.toggle("on", b.dataset.view === v);
+  history.replaceState(null, "", "#" + v);
+  store("view", v);
+  if (v === "jobs") loadJobs(true);
+  if (v === "inbox") { inboxSig = ""; loadInbox(); }
+  if (v === "you") showYou(store("yousub") || "profile");
+  if (v === "chat" && !chatLoaded) { chatLoaded = true; loadChatList(); openChat(chatId); }
+  if (v === "tasks") { const b = $("v-tasks").querySelector(".vbody"); b.scrollTop = b.scrollHeight; }
+}
+
+// ---------- theme and alerts ----------
+function applyTheme(t){
+  if (t) document.documentElement.dataset.theme = t; else delete document.documentElement.dataset.theme;
+  const dark = t ? t === "dark" : matchMedia("(prefers-color-scheme: dark)").matches;
+  const b = $("theme"); b.replaceChildren(icon(dark ? "sun" : "moon"), el("span", null, dark ? "Light mode" : "Dark mode"));
+}
+$("theme").onclick = () => {
+  const dark = document.documentElement.dataset.theme ? document.documentElement.dataset.theme === "dark" : matchMedia("(prefers-color-scheme: dark)").matches;
+  const t = dark ? "light" : "dark"; store("theme", t); applyTheme(t);
+};
+applyTheme(store("theme"));
+matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => applyTheme(store("theme")));
 function b64ToBytes(s){
   const pad = "=".repeat((4 - s.length % 4) % 4);
   const raw = atob((s + pad).replace(/-/g, "+").replace(/_/g, "/"));
@@ -1201,51 +1488,164 @@ async function setupAlerts(){
   if (!("serviceWorker" in navigator) || !("PushManager" in window)) return;
   const reg = await navigator.serviceWorker.register("sw.js");
   const btn = $("alerts");
-  btn.style.display = "inline-block";
+  const label = on => btn.replaceChildren(icon("bell"), el("span", null, on ? "Alerts on" : "Turn on alerts"));
+  btn.style.display = "";
   const existing = await reg.pushManager.getSubscription();
-  if (existing) {
-    btn.textContent = "Alerts on";
-    await post("api/push/subscribe", existing.toJSON());  // refresh on the server
-  }
+  label(!!existing);
+  if (existing) send("api/push/subscribe", "POST", existing.toJSON()).catch(() => {});
   btn.onclick = async () => {
     try {
       const perm = await Notification.requestPermission();
-      if (perm !== "granted") { alert("Notifications were not allowed."); return; }
-      const {key} = await (await fetch("api/push/key")).json();
+      if (perm !== "granted") return toast("Notifications were not allowed.", true);
+      const {key} = await api("api/push/key");
       const sub = (await reg.pushManager.getSubscription()) ||
         await reg.pushManager.subscribe({userVisibleOnly: true, applicationServerKey: b64ToBytes(key)});
-      await post("api/push/subscribe", sub.toJSON());
-      await post("api/push/test");
-      btn.textContent = "Alerts on";
-    } catch (e) { alert("Could not turn on alerts: " + e); }
+      await send("api/push/subscribe", "POST", sub.toJSON());
+      await send("api/push/test", "POST");
+      label(true); toast("Alerts are on");
+    } catch (e) { toast("Could not turn on alerts: " + e.message, true); }
   };
 }
-const KIND = {fact: "from your profile", draft: "draft by the local model, check every claim",
-  legal: "read and answer yourself", you: "needs you", file: "attach", eeo: "voluntary"};
-const VIEWS = ["chat", "log", "jobs", "memory", "profile"];
-let view = "", jobsSig = "", openJob = null, openBody = null;
-function showView(v){
-  if (!VIEWS.includes(v)) v = "chat";
-  view = v;
-  for (const name of VIEWS) $(name).classList.toggle("on", name === v);
-  for (const b of $("tabs").children) b.classList.toggle("on", b.dataset.view === v);
-  document.querySelector("footer").style.display = (v === "chat" || v === "log") ? "" : "none";
-  renderFiles();
-  $("task").placeholder = v === "chat" ? "Message" : "Give the agent a task";
-  history.replaceState(null, "", "#" + v);
-  try { localStorage.setItem("view", v); } catch (e) {}
-  if (v === "jobs") { jobsSig = ""; loadJobs(); }
-  if (v === "memory") loadMemory();
-  if (v === "profile") loadProfile();
-  if (v === "chat" && !chatLoaded) { chatLoaded = true; loadChatList(); openChat(chatId); }
+
+// ---------- tasks (the agent's log) ----------
+let last = 0, pendingId = null;
+function render(ev){
+  const box = el("div", "ev");
+  if (ev.kind === "task") { box.classList.add("task"); box.append(el("div", "tt", ev.text)); }
+  else if (ev.kind === "thought") box.append(el("div", "thought", "Step " + ev.step + " · " + ev.stats + " — " + ev.text));
+  else if (ev.kind === "action") {
+    box.append(el("div", "tool", ev.tool + (ev.auto ? " · auto-approved, read-only" : "")), pre(ev.arg));
+    if (ev.content) box.append(pre(ev.content));
+  }
+  else if (ev.kind === "result") { const d = el("details"); d.append(el("summary", null, "Result"), pre(ev.text)); box.append(d); }
+  else if (ev.kind === "rejected") { box.classList.add("err"); box.append(el("div", "bad", "Denied" + (ev.text ? ": " + ev.text : ""))); }
+  else if (ev.kind === "answer") { box.classList.add("answer"); box.append(el("div", "ans", ev.text)); }
+  else { box.classList.add("err"); box.append(el("div", "bad", ev.text)); }
+  $("events").append(box);
+}
+function setStatus(text, cls){
+  for (const [d, s] of [["dot", "status"], ["dot2", "status2"]]) { $(s).textContent = text; $(d).className = "dot " + cls; }
+}
+async function poll(){
+  try {
+    const r = await fetch("api/state?since=" + last);
+    if (!r.ok) return setStatus("error " + r.status, "off");
+    const s = await r.json();
+    if (s.seq < last) { last = 0; $("events").replaceChildren(); return poll(); }
+    const body = $("v-tasks").querySelector(".vbody");
+    const nearBottom = body.scrollHeight - body.scrollTop - body.clientHeight < 80;
+    if (!last && !s.events.length && !$("events").childNodes.length) {
+      const e = el("div", "empty"); e.append(icon("tasks"), el("b", null, "No tasks yet"), el("div", null, "Ask the agent to do something on the server: check disk space, organize files, summarize a log."));
+      $("events").append(e);
+    }
+    if (s.events.length) { const e = $("events").querySelector(".empty"); if (e) e.remove(); }
+    for (const e of s.events) { render(e); last = Math.max(last, e.n); }
+    const p = s.pending;
+    setStatus(p ? "waiting for approval" : s.status + (s.task ? " · " + s.task : ""), p ? "wait" : s.status === "idle" ? "idle" : "busy");
+    if (p && p.id !== pendingId) {
+      pendingId = p.id;
+      const b = $("pbody");
+      b.replaceChildren(el("div", "tool small", p.tool), pre(p.arg));
+      if (p.content) b.append(pre(p.content));
+      $("reason").value = "";
+      $("pending").classList.add("on");
+    }
+    if (!p) { pendingId = null; $("pending").classList.remove("on"); }
+    $("banner").classList.toggle("on", !!p && view !== "tasks");
+    badge("tasks", p ? 1 : 0, true);
+    if (s.events.length && nearBottom) body.scrollTop = body.scrollHeight;
+  } catch (e) { setStatus("offline", "off"); }
+}
+$("banner").onclick = () => showView("tasks");
+$("approve").onclick = () => { if (pendingId) { const id = pendingId; pendingId = "sent"; send("api/decision", "POST", {id, approve: true}).catch(e => toast(e.message, true)).then(poll); } };
+$("deny").onclick = () => { if (pendingId) { const id = pendingId; pendingId = "sent"; send("api/decision", "POST", {id, approve: false, reason: $("reason").value}).catch(e => toast(e.message, true)).then(poll); } };
+$("stop").onclick = () => send("api/stop", "POST").catch(e => toast(e.message, true)).then(poll);
+$("clear").onclick = () => send("api/clear", "POST").then(() => { last = 0; $("events").replaceChildren(); poll(); }, e => toast(e.message, true));
+
+// ---------- composers and attachments ----------
+// Files are turned into text on the server first, so the page can show how long the
+// model will take to read them. Chat puts the text in the message (first 16,000
+// characters); Tasks saves each file into the agent's workspace.
+const READ_RATE = {better: 17, faster: 35};  // tokens per second, measured on the server
+const composers = {c: {files: []}, t: {files: []}};
+let pickFor = "c";
+function readTime(chars){
+  const s = Math.round(chars / 4 / READ_RATE[chatModel]);
+  return s < 60 ? "~" + Math.max(s, 1) + " s to read" : "~" + Math.round(s / 60) + " min to read";
+}
+function renderFiles(k){
+  const box = $(k + "-files"), list = composers[k].files;
+  box.replaceChildren();
+  let left = 16000;
+  for (const f of list) {
+    let label = f.name;
+    if (f.reading) label += " · reading...";
+    else if (k === "c") {
+      const used = Math.min(f.chars, Math.max(left, 0));
+      left -= used;
+      label += " · " + f.chars.toLocaleString() + " chars" + (used < f.chars ? ", first " + used.toLocaleString() + " used" : "") + " · " + readTime(used);
+    } else label += " · " + f.chars.toLocaleString() + " chars, saved to the workspace";
+    const chip = el("div", "fchip"); chip.title = label;
+    const x = el("button", null, "×"); x.setAttribute("aria-label", "Remove " + f.name);
+    x.onclick = () => { composers[k].files = list.filter(a => a !== f); renderFiles(k); };
+    chip.append(el("span", null, label), x);
+    box.append(chip);
+  }
+  box.classList.toggle("on", list.length > 0);
+}
+async function toBase64(file){
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  let s = "";
+  for (let i = 0; i < bytes.length; i += 0x8000) s += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+  return btoa(s);
+}
+async function addFile(k, file){
+  if (file.size > 5e6) return toast(file.name + " is over 5 MB.", true);
+  const f = {name: file.name, reading: true, chars: 0, text: ""};
+  composers[k].files.push(f);
+  renderFiles(k);
+  try {
+    const d = await send("api/extract", "POST", {name: file.name, data: await toBase64(file)});
+    Object.assign(f, {name: d.name, text: d.text, chars: d.chars, reading: false});
+  } catch (e) {
+    composers[k].files = composers[k].files.filter(a => a !== f);
+    toast(file.name + ": " + e.message, true);
+  }
+  renderFiles(k);
+}
+$("filepick").onchange = async () => {
+  const picked = [...$("filepick").files];
+  $("filepick").value = "";
+  for (const file of picked) await addFile(pickFor, file);
+};
+function grow(t){ t.style.height = "auto"; t.style.height = Math.min(t.scrollHeight, 200) + "px"; }
+for (const k of ["c", "t"]) {
+  const input = $(k + "-input");
+  $(k + "-attach").onclick = () => { pickFor = k; $("filepick").click(); };
+  input.addEventListener("input", () => grow(input));
+  input.addEventListener("keydown", e => { if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); $(k + "-send").click(); } });
+  $(k + "-send").onclick = () => {
+    if (k === "c" && chatAbort) { chatAbort.abort(); return; }
+    const text = input.value.trim(), list = composers[k].files;
+    if (!text && !list.length) return;
+    if (list.some(f => f.reading)) return toast("Still reading a file.");
+    const files = list.map(f => ({name: f.name, text: f.text}));
+    input.value = ""; grow(input);
+    composers[k].files = []; renderFiles(k);
+    if (k === "c") sendChat(text, files);
+    else send("api/task", "POST", {task: text, files}).then(poll, e => toast(e.message, true));
+  };
 }
 
 // ---------- chat ----------
-let chatId = "", chatAbort = null, chatLoaded = false;
-try { chatId = localStorage.getItem("chat") || ""; } catch (e) {}
+let chatId = store("chat") || "", chatAbort = null, chatLoaded = false, chatModel = store("chatmodel") || "better", chats = [];
+function setModel(m){ chatModel = m; store("chatmodel", m); for (const b of $("chatmodel").children) b.classList.toggle("on", b.dataset.m === m); renderFiles("c"); }
+for (const b of $("chatmodel").children) b.onclick = () => setModel(b.dataset.m);
+setModel(chatModel);
+const msgBox = () => $("msgs");
 function nearEnd(box){ return box.scrollHeight - box.scrollTop - box.clientHeight < 120; }
-// Light formatting for replies: code blocks, **bold**, `code` and # headings. Built
-// from text nodes and elements, never innerHTML, like the rest of the page.
+// Light formatting for replies: code blocks, **bold**, `code` and # headings, built
+// from text nodes and elements.
 function inline(parent, line){
   for (const piece of line.split(/(\*\*[^*\n]+\*\*|`[^`\n]+`)/)) {
     if (/^\*\*[^*]+\*\*$/.test(piece)) { const b = el("strong"); inline(b, piece.slice(2, -2)); parent.append(b); }
@@ -1272,121 +1672,82 @@ function rich(box, text){
 function addMsg(role, text, files){
   const d = el("div", "msg " + role);
   if (role === "assistant") rich(d, text); else d.textContent = text;
-  if (files && files.length) d.append(el("div", "files", "Attached: " + files.map(f => f.name).join(", ")));
-  $("msgs").append(d);
+  if (files && files.length) d.append(el("div", "files", "\u{1F4CE} " + files.map(f => f.name).join(", ")));
+  $("msgwrap").append(d);
   return d;
 }
-
-// ---------- attachments ----------
-// Files are turned into text on the server first, so the page can show how long the
-// model will take to read them. Chat puts the text in the message (first 16,000
-// characters); Tasks saves each file into the agent's workspace.
-let attached = [];
-const READ_RATE = {better: 17, faster: 35};  // tokens per second, measured on the server
-function readTime(chars){
-  const s = Math.round(chars / 4 / READ_RATE[$("chatmodel").value || "better"]);
-  return s < 60 ? "about " + Math.max(s, 1) + " s to read" : "about " + Math.round(s / 60) + " min to read";
-}
-function renderFiles(){
-  const box = $("files");
-  box.replaceChildren();
-  let left = 16000;
-  for (const f of attached) {
-    const chip = el("div", "chip");
-    let label = f.name;
-    if (f.reading) label += ", reading...";
-    else if (view === "chat") {
-      const used = Math.min(f.chars, Math.max(left, 0));
-      left -= used;
-      label += ", " + f.chars.toLocaleString() + " characters" + (used < f.chars ? ", first " + used.toLocaleString() + " used" : "") + ", " + readTime(used);
-    } else label += ", " + f.chars.toLocaleString() + " characters, saved to the workspace";
-    chip.title = label;
-    const x = el("button", null, "\u00d7");
-    x.setAttribute("aria-label", "Remove " + f.name);
-    x.onclick = () => { attached = attached.filter(a => a !== f); renderFiles(); };
-    chip.append(el("span", null, label), x);
-    box.append(chip);
+function hello(){
+  const h = el("div", "hello");
+  const logo = el("div", "logo"); logo.append(icon("sparkle"));
+  h.append(logo, el("h2", null, "What can I help with?"), el("div", null, "Replies are written on your own server, with no internet access."));
+  const sg = el("div", "suggest");
+  for (const s of ["Write a follow-up email after an interview", "Explain a Python error I paste", "Make a study plan for system design", "Rewrite my resume bullet to sound stronger"]) {
+    const b = el("button", null, s);
+    b.onclick = () => { const i = $("c-input"); i.value = s; grow(i); i.focus(); };
+    sg.append(b);
   }
-  box.classList.toggle("on", attached.length > 0 && (view === "chat" || view === "log"));
+  h.append(sg);
+  $("msgwrap").append(h);
 }
-async function toBase64(file){
-  const bytes = new Uint8Array(await file.arrayBuffer());
-  let s = "";
-  for (let i = 0; i < bytes.length; i += 0x8000) s += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
-  return btoa(s);
-}
-async function addFile(file){
-  if (file.size > 5e6) { alert(file.name + " is over 5 MB."); return; }
-  const f = {name: file.name, reading: true, chars: 0, text: ""};
-  attached.push(f);
-  renderFiles();
-  try {
-    const r = await fetch("api/extract", {method: "POST", headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({name: file.name, data: await toBase64(file)})});
-    const d = await r.json().catch(() => ({}));
-    if (!r.ok) throw new Error(d.detail || ("Error " + r.status));
-    Object.assign(f, {name: d.name, text: d.text, chars: d.chars, reading: false});
-  } catch (e) {
-    attached = attached.filter(a => a !== f);
-    alert(file.name + ": " + e.message);
+function renderChatList(){
+  const list = $("chatlist"), pick = $("chatpick");
+  list.replaceChildren(); pick.replaceChildren();
+  const o = el("option", null, "New chat"); o.value = ""; pick.append(o);
+  if (!chats.length) list.append(el("div", "muted small", "No conversations yet."));
+  for (const c of chats) {
+    const b = el("button", "citem" + (c.id === chatId ? " on" : ""), c.title);
+    b.onclick = () => { if (!chatAbort) openChat(c.id); };
+    list.append(b);
+    const op = el("option", null, c.title); op.value = c.id; pick.append(op);
   }
-  renderFiles();
-}
-$("attach").onclick = () => $("filepick").click();
-$("filepick").onchange = async () => {
-  const picked = [...$("filepick").files];
-  $("filepick").value = "";
-  for (const file of picked) await addFile(file);
-};
-async function loadChatList(){
-  let list = [];
-  try { list = await (await fetch("api/chats")).json(); } catch (e) {}
-  const pick = $("chatpick");
-  pick.replaceChildren(el("option", null, "New chat"));
-  pick.firstChild.value = "";
-  for (const c of list) { const o = el("option", null, c.title); o.value = c.id; pick.append(o); }
-  if (chatId && !list.some(c => c.id === chatId)) chatId = "";
   pick.value = chatId;
+}
+async function loadChatList(){
+  try { chats = await api("api/chats"); } catch (e) { chats = []; }
+  if (chatId && !chats.some(c => c.id === chatId)) chatId = "";
+  renderChatList();
 }
 async function openChat(id){
   chatId = id;
-  try { localStorage.setItem("chat", id); } catch (e) {}
-  $("msgs").replaceChildren();
+  store("chat", id);
+  $("msgwrap").replaceChildren();
   $("chatdel").style.display = id ? "" : "none";
-  if (!id) { $("msgs").append(el("div", "hint", "Ask anything. Replies are written on this server, with no internet access. Say 'remember that ...' to save a fact about you.")); return; }
+  const c = chats.find(x => x.id === id);
+  $("chattitle").textContent = c ? c.title : "New chat";
+  renderChatList();
+  if (!id) return hello();
   try {
-    const r = await fetch("api/chats/" + encodeURIComponent(id));
-    if (!r.ok) { openChat(""); return; }
-    const c = await r.json();
-    for (const m of c.messages) addMsg(m.role, m.text || m.content, m.files);
-  } catch (e) {}
-  $("chat").scrollTop = $("chat").scrollHeight;
+    const data = await api("api/chats/" + encodeURIComponent(id));
+    for (const m of data.messages) addMsg(m.role, m.text || m.content, m.files);
+  } catch (e) { return openChat(""); }
+  msgBox().scrollTop = msgBox().scrollHeight;
 }
 async function sendChat(text, files){
   if (chatAbort) return;
-  if (!chatId) $("msgs").replaceChildren();
+  if (!chatId) $("msgwrap").replaceChildren();
   files = files || [];
   addMsg("user", text || (files.length > 1 ? "Summarize the attached files." : "Summarize the attached file."), files);
   const out = addMsg("assistant", "Thinking. After a pause or a model switch, the first reply can take a minute.");
   out.classList.add("typing");
-  const box = $("chat");
+  const box = msgBox();
   box.scrollTop = box.scrollHeight;
   chatAbort = new AbortController();
-  $("send").textContent = "Stop";
+  const sendBtn = $("c-send");
+  sendBtn.classList.add("stop"); sendBtn.replaceChildren(icon("x")); sendBtn.title = "Stop";
   let got = "";
   try {
     const r = await fetch("api/chat", {method: "POST", headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({message: text, chat_id: chatId, model: $("chatmodel").value, files}), signal: chatAbort.signal});
+      body: JSON.stringify({message: text, chat_id: chatId, model: chatModel, files}), signal: chatAbort.signal});
     if (!r.ok) {
       const t = await r.json().catch(() => ({}));
       out.textContent = t.detail || ("Error " + r.status);
-      out.classList.add("err");
+      out.classList.remove("typing"); out.classList.add("err");
       return;
     }
     const id = r.headers.get("X-Chat-Id") || "";
     const isNew = id !== chatId;
     chatId = id;
-    try { localStorage.setItem("chat", id); } catch (e) {}
+    store("chat", id);
     const reader = r.body.getReader(), dec = new TextDecoder();
     for (;;) {
       const {done, value} = await reader.read();
@@ -1397,359 +1758,533 @@ async function sendChat(text, files){
       out.classList.remove("typing");
       if (follow) box.scrollTop = box.scrollHeight;
     }
-    if (isNew) { await loadChatList(); $("chatdel").style.display = ""; }
+    if (isNew) { await loadChatList(); const c = chats.find(x => x.id === chatId); $("chattitle").textContent = c ? c.title : ""; $("chatdel").style.display = ""; }
   } catch (e) {
     out.classList.remove("typing");
     rich(out, got + (e.name === "AbortError" ? " (stopped)" : "\n(connection lost)"));
   } finally {
     chatAbort = null;
-    $("send").textContent = "Send";
+    sendBtn.classList.remove("stop"); sendBtn.replaceChildren(icon("send")); sendBtn.title = "Send";
   }
 }
+$("newchat").onclick = () => { if (!chatAbort) { openChat(""); $("c-input").focus(); } };
 $("chatpick").onchange = () => { if (!chatAbort) openChat($("chatpick").value); };
 $("chatdel").onclick = async () => {
   if (!chatId || !confirm("Delete this conversation?")) return;
   await fetch("api/chats/" + encodeURIComponent(chatId), {method: "DELETE"});
-  await openChat("");
-  loadChatList();
+  await loadChatList();
+  openChat("");
 };
-try { $("chatmodel").value = localStorage.getItem("chatmodel") || "better"; } catch (e) {}
-$("chatmodel").onchange = () => { try { localStorage.setItem("chatmodel", $("chatmodel").value); } catch (e) {} renderFiles(); };
 
-// ---------- memory ----------
-let memMax = 2000;
-function memCount(){ const n = $("memtext").value.length; $("memcount").textContent = n + " of " + memMax + " characters"; }
-async function loadMemory(){
-  try { const m = await (await fetch("api/memory")).json(); $("memtext").value = m.text; memMax = m.max; } catch (e) {}
-  memCount();
+// ---------- jobs ----------
+const FILTERS = [["review", "Review"], ["approved", "Approved"], ["new", "New"], ["applied", "Applied"], ["interview", "Interviewing"], ["rejected", "Rejected"], ["skipped", "Skipped"], ["all", "All"]];
+let S = null, jfilter = store("jfilter") || "review", jsel = null, listSig = "", applySig = "";
+function counts(s){
+  const c = {review: (s.review || []).length, all: s.jobs.length};
+  for (const j of s.jobs) c[j.status] = (c[j.status] || 0) + 1;
+  return c;
 }
-$("memtext").oninput = memCount;
-$("memsave").onclick = async () => {
-  const r = await fetch("api/memory", {method: "PUT", headers: {"Content-Type": "application/json"}, body: JSON.stringify({text: $("memtext").value})});
-  if (!r.ok) { const t = await r.json().catch(() => ({})); alert(t.detail || ("Error " + r.status)); return; }
-  $("memsave").textContent = "Saved";
-  setTimeout(() => { $("memsave").textContent = "Save"; }, 1500);
-};
-for (const b of $("tabs").children) b.onclick = () => showView(b.dataset.view);
-
-// ---------- application profile ----------
-let profileDirty = false;
-function pInput(value, choices, multi){
-  let input;
-  if (choices) {
-    input = el("select");
-    const opts = [""].concat(choices);
-    if (value && !choices.includes(value)) opts.push(value);
-    for (const c of opts) { const o = el("option", null, c || "Choose"); o.value = c; input.append(o); }
-  } else if (multi) input = el("textarea");
-  else { input = el("input"); input.autocomplete = "off"; }
-  input.value = value || "";
-  return input;
-}
-function pField(label, input, help){
-  const f = el("div", "pfield" + (input.value ? "" : " empty"));
-  const l = el("label", null, label);
-  f.append(l, input);
-  if (help) f.append(el("div", "thought", help));
-  input.addEventListener("input", () => { profileDirty = true; f.classList.toggle("empty", !input.value.trim()); $("pstat").textContent = "Unsaved changes"; });
-  return f;
-}
-async function loadProfile(){
-  if (profileDirty) return;
-  let p;
-  try { const r = await fetch("api/jobs/profile"); if (!r.ok) return; p = await r.json(); } catch (e) { return; }
-  const box = $("pform");
-  box.replaceChildren();
-  let empty = 0, total = 0;
-  for (const sec of p.form) {
-    box.append(el("h3", "psec", sec.section));
-    for (const f of sec.fields) {
-      const input = pInput(p.profile[f.key], f.choices, false);
-      input.dataset.key = f.key;
-      total++; if (!input.value) empty++;
-      box.append(pField(f.label, input, f.help));
-    }
-  }
-  box.append(el("h3", "psec", "Questions it still can't answer"));
-  box.append(el("div", "hint", p.unanswered.length
-    ? "From the " + p.prepared_jobs + " jobs with prepared answers, most common first. Answer once and it's used on every form that asks. Leave empty to skip."
-    : "None right now. Questions show up here as jobs get prepared."));
-  for (const u of p.unanswered) {
-    const input = pInput("", u.options.length && u.options.length <= 12 ? u.options : null, !u.options.length);
-    input.dataset.q = u.q;
-    const where = u.jobs + (u.jobs === 1 ? " job" : " jobs") + ": " + u.companies.join(", ");
-    box.append(pField(u.q, input, where + (u.options.length > 12 ? ". Choices include " + u.options.slice(0, 6).join(", ") : "")));
-  }
-  box.append(el("h3", "psec", "Your saved answers"));
-  if (!p.answers.length) box.append(el("div", "hint", "None yet. Clear one to remove it."));
-  for (const a of p.answers) {
-    const input = pInput(a.a, null, true);
-    input.dataset.q = a.q;
-    box.append(pField(a.q, input, ""));
-  }
-  $("pstat").textContent = empty ? empty + " of " + total + " fields empty" : "Every field filled in";
-}
-$("psavebtn").onclick = async () => {
-  const values = {}, answers = [];
-  for (const i of $("pform").querySelectorAll("[data-key]")) values[i.dataset.key] = i.value.trim();
-  for (const i of $("pform").querySelectorAll("[data-q]")) if (i.value.trim()) answers.push({q: i.dataset.q, a: i.value.trim()});
-  const r = await fetch("api/jobs/profile", {method: "PUT", headers: {"Content-Type": "application/json"}, body: JSON.stringify({values, answers})});
-  if (!r.ok) { const t = await r.json().catch(() => ({})); alert(t.detail || ("Error " + r.status)); return; }
-  profileDirty = false;
-  $("pstat").textContent = "Saved";
-  loadProfile();
-};
 function jobsMeta(s){
   const p = s.progress, lr = s.last_run;
-  if (p.running) return "Running: " + p.step + (p.total ? " (" + p.done + "/" + p.total + ")" : "");
-  if (!lr) return "Not run yet.";
-  const when = new Date(lr.finished || lr.started).toLocaleString([], {dateStyle: "medium", timeStyle: "short"});
+  if (p.running) return "Searching now: " + p.step + (p.total ? " (" + p.done + "/" + p.total + ")" : "");
+  if (!lr) return "The search hasn't run yet.";
   const n = x => (x || 0).toLocaleString();
-  let t = "Last run " + when + ": " + n(lr.boards) + " companies, " + n(lr.new) + " new postings, " + n(lr.matched) + " passed the filters, " + n(lr.scored) + " scored";
+  let t = "Last search " + when(lr.finished || lr.started) + ": " + n(lr.boards) + " companies, " + n(lr.new) + " new postings, " + n(lr.scored) + " scored";
   if (lr.backlog) t += ", " + n(lr.backlog) + " left for the next run";
-  return t + ". " + s.discovered + " companies found through search.";
+  return t + ".";
 }
-let inboxSig = "";
-const MAIL_KIND = {interview: "Interview", rejection: "Rejection", confirmation: "Application received",
-  verification: "Verification", other: "Other"};
-function mailCard(m, withJob){
-  const c = el("div", "card job");
-  const f = el("div", "flags");
-  f.append(el("span", "flag kind-" + m.kind, MAIL_KIND[m.kind] || m.kind));
-  c.append(f, el("strong", null, m.subject || "(no subject)"));
-  const when = new Date(m.date).toLocaleString([], {dateStyle: "medium", timeStyle: "short"});
-  c.append(el("div", "tool", [m.from, when, withJob && m.company ? m.company + ": " + m.title : ""].filter(Boolean).join(" \u00b7 ")));
-  if (m.code) {
-    c.append(el("div", "code", m.code));
-    const b = el("button", "ghost", "Copy code");
-    b.onclick = () => navigator.clipboard.writeText(m.code).then(() => { b.textContent = "Copied"; });
-    c.append(b);
-  }
-  if (m.snippet) { const d = el("details"); d.append(el("summary", null, "Email text"), pre(m.snippet)); c.append(d); }
-  return c;
+function scoreRing(score, s, big){
+  const r = el("div", "ring" + (score >= s.strong ? " strong" : score >= s.good ? " good" : "") + (big ? " big" : ""), String(score));
+  r.style.setProperty("--p", Math.max(0, Math.min(100, score || 0)));
+  return r;
 }
-function inboxSetup(box, error){
-  const c = el("div", "card setup");
-  c.append(el("strong", null, "Connect the agent's inbox"),
-    el("div", "thought", "An address just for applications. The agent reads it every 5 minutes without marking anything read: confirmations mark jobs Applied, interview requests and rejections move them along, and verification codes show up here and as alerts. Links in emails are never opened. Use an app password, not the account password: in Yahoo, Account Info, Account Security, Generate app password; in Gmail, turn on 2-step verification, then Google Account, Security, App passwords. Your profile's email becomes this address."));
-  const addr = el("input"); addr.type = "email"; addr.placeholder = "Address"; addr.autocomplete = "off";
-  const pw = el("input"); pw.type = "password"; pw.placeholder = "App password"; pw.autocomplete = "new-password";
-  const b = el("button", "approve", "Connect"); b.style.marginTop = "8px";
-  const msg = el("div", "err", error || "");
-  b.onclick = async () => {
-    b.disabled = true; b.textContent = "Checking the login"; msg.textContent = "";
-    const r = await fetch("api/inbox", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({address: addr.value, password: pw.value})});
-    b.disabled = false; b.textContent = "Connect";
-    if (!r.ok) { const t = await r.json().catch(() => ({})); msg.textContent = t.detail || ("Error " + r.status); return; }
-    pw.value = ""; inboxSig = ""; loadInbox();
-  };
-  c.append(addr, pw, b, msg);
-  box.append(c);
+function statusChip(st){
+  const map = {approved: ["acc", "Approved"], applied: ["good", "Applied"], interview: ["good", "Interviewing"], rejected: ["bad", "Rejected"], skipped: ["", "Skipped"]};
+  const m = map[st]; return m ? el("span", "chip " + m[0], m[1]) : null;
 }
-async function loadInbox(){
+function listJobs(){
+  if (jfilter === "review") return (S.review || []).map(id => S.jobs.find(j => j.id === id)).filter(Boolean);
+  return S.jobs.filter(j => jfilter === "all" || j.status === jfilter);
+}
+async function loadJobs(force){
   let s;
-  try { const r = await fetch("api/inbox"); if (!r.ok) return; s = await r.json(); } catch (e) { return; }
-  if ($("jfilter").value !== "emails") return;
-  const sig = JSON.stringify(s);
-  if (sig === inboxSig) return;
-  inboxSig = sig;
-  const box = $("jlist");
-  box.replaceChildren();
-  $("jmeta").textContent = "";
-  if (!s.configured) { inboxSetup(box); return; }
-  const when = s.checked ? new Date(s.checked).toLocaleString([], {dateStyle: "medium", timeStyle: "short"}) : "not yet";
-  $("jmeta").textContent = s.address + ". Checked " + when + ".";
-  if (s.error) box.append(el("div", "err", s.error));
-  const bar = el("div", "btns");
-  const check = el("button", "ghost", "Check now");
-  check.onclick = async () => {
-    check.disabled = true;
-    const r = await fetch("api/inbox/check", {method: "POST"});
-    if (!r.ok) { const t = await r.json().catch(() => ({})); alert(t.detail || ("Error " + r.status)); }
-    check.disabled = false; inboxSig = ""; loadInbox();
-  };
-  const off = el("button", "ghost", "Disconnect");
-  off.onclick = async () => { if (!confirm("Disconnect the inbox? The saved login and the email list are deleted from the server.")) return; await fetch("api/inbox", {method: "DELETE"}); inboxSig = ""; loadInbox(); };
-  bar.append(check, off); bar.style.marginTop = "0"; bar.style.marginBottom = "10px";
-  box.append(bar);
-  if (!s.messages.length) box.append(el("div", "thought", "No emails yet."));
-  for (const m of s.messages) box.append(mailCard(m, true));
-}
-async function loadJobs(){
-  if ($("jfilter").value === "emails") { jobsSig = ""; return loadInbox(); }
-  inboxSig = "";
-  let s;
-  try { const r = await fetch("api/jobs"); if (!r.ok) return; s = await r.json(); } catch (e) { return; }
-  if ($("jfilter").value === "emails") return;  // switched while loading
+  try { s = await api("api/jobs"); } catch (e) { return; }
+  S = s;
+  const c = counts(s);
+  badge("jobs", c.review);
+  if (view !== "jobs") return;
   $("jmeta").textContent = jobsMeta(s);
   $("jrun").disabled = s.progress.running || !s.configured;
-  const f = $("jfilter").value;
-  const inReview = new Set(s.review || []);
-  const list = f === "review" ? s.jobs.filter(j => inReview.has(j.id))
-    : s.jobs.filter(j => f === "all" || j.status === f);
-  updateApply(s.approved || 0);
-  const sig = f + JSON.stringify(list);
-  if (sig === jobsSig) return;
-  jobsSig = sig;
-  const box = $("jlist");
-  box.replaceChildren();
-  if (!s.configured) { box.append(el("div", "thought", "Job search isn't set up. Put config.json, profile.json and resume.txt in the jobs folder on the server.")); return; }
-  if (f === "review") box.append(el("div", "thought", list.length
-    ? list.length + " applications ready. Open one, check the answers, fill in what's missing, tick the statements you agree to and approve. Approved ones are submitted from Apply to approved."
-    : "Nothing to review. New applications are prepared overnight."));
-  else if (!list.length) box.append(el("div", "thought", "Nothing here yet."));
-  for (const j of list) box.append(jobCard(j, s));
+  // stats
+  const st = $("jstats"); st.replaceChildren();
+  for (const [k, label, hl] of [["review", "To review", true], ["approved", "Approved"], ["applied", "Applied"], ["interview", "Interviews"]]) {
+    const b = el("button", "stat" + (hl ? " hl" : ""));
+    b.append(el("b", null, String(c[k] || 0)), el("span", null, label));
+    b.onclick = () => setFilter(k);
+    st.append(b);
+  }
+  // filters
+  const f = $("jfilter"); f.replaceChildren();
+  for (const [k, label] of FILTERS) {
+    const b = el("button", k === jfilter ? "on" : "");
+    b.append(document.createTextNode(label));
+    if (c[k]) b.append(el("span", "n", String(c[k])));
+    b.onclick = () => setFilter(k);
+    f.append(b);
+  }
+  updateApply(c.approved || 0);
+  const list = listJobs();
+  const sig = jfilter + JSON.stringify(list.map(j => [j.id, j.status, j.prepared, j.score]));
+  if (sig !== listSig || force) { listSig = sig; renderList(list, s); }
+  if (!s.configured) $("jdetail").replaceChildren(emptyState("jobs", "Job search isn't set up", "Put config.json and resume.txt in the jobs folder on the server."));
+  else if (!jsel && !document.querySelector("#jdetail .jd")) $("jdetail").replaceChildren(emptyState("jobs", list.length ? "Pick a job" : "Nothing here", list.length ? "Its answers, the posting and the actions open here." : (jfilter === "review" ? "New applications are prepared overnight." : "No jobs with this status.")));
 }
-function jobCard(j, s){
-  const c = el("div", "card job");
-  const top = el("div", "jtop");
-  top.append(el("span", "score " + (j.score >= s.strong ? "strong" : j.score >= s.good ? "good" : ""), String(j.score)), el("strong", null, j.title));
-  c.append(top, el("div", "tool", [j.company, j.location, j.level, j.years != null ? j.years + "+ years" : ""].filter(Boolean).join(" \u00b7 ")));
-  const f = el("div", "flags");
-  if (j.no_sponsorship) f.append(el("span", "flag no", "No sponsorship"));
-  else if (j.sponsors) f.append(el("span", "flag yes", "Sponsors visas"));
-  if (j.prepared) f.append(el("span", "flag", "Answers ready"));
-  if (j.status !== "new") f.append(el("span", "flag", j.status));
-  if (f.childNodes.length) c.append(f);
-  if (j.summary) c.append(el("div", "thought", j.summary));
+function emptyState(ic, title, text){ const e = el("div", "empty"); e.append(icon(ic), el("b", null, title), el("div", null, text)); return e; }
+function setFilter(k){ jfilter = k; store("jfilter", k); jsel = null; listSig = ""; $("jdetail").replaceChildren(); $("v-jobs").classList.remove("detail"); loadJobs(true); }
+function renderList(list, s){
+  const box = $("jlist"); box.replaceChildren();
+  if (jfilter === "review" && list.length) box.append(el("div", "muted small", "Check each one, fill what's missing, tick the statements you agree to, approve. Approved ones are submitted from Apply to approved."));
+  if (!list.length) box.append(emptyState(jfilter === "review" ? "check" : "jobs", jfilter === "review" ? "All caught up" : "Nothing here", jfilter === "review" ? "New applications are prepared overnight." : "No jobs with this status yet."));
+  for (const j of list) {
+    const r = el("button", "jrow" + (j.id === jsel ? " on" : ""));
+    r.dataset.id = j.id;
+    const info = el("div", "jinfo");
+    info.append(el("div", "jt", j.title), el("div", "jm", [j.company, j.location].filter(Boolean).join(" · ")));
+    const chips = el("div", "chips");
+    const sc = statusChip(j.status); if (sc && jfilter !== j.status) chips.append(sc);
+    if (j.prepared && j.status === "new") chips.append(el("span", "chip acc", "Answers ready"));
+    if (j.no_sponsorship) chips.append(el("span", "chip bad", "No sponsorship"));
+    else if (j.sponsors) chips.append(el("span", "chip good", "Sponsors"));
+    if (j.level) chips.append(el("span", "chip", j.level));
+    info.append(chips);
+    r.append(scoreRing(j.score, s), info);
+    r.onclick = () => selectJob(j.id);
+    box.append(r);
+  }
+}
+async function selectJob(id){
+  jsel = id;
+  for (const r of document.querySelectorAll(".jrow")) r.classList.toggle("on", r.dataset.id === id);
+  $("v-jobs").classList.add("detail");
+  const d = $("jdetail");
+  d.replaceChildren(emptyState("jobs", "Loading...", ""));
+  let j;
+  try { j = await api("api/jobs/detail?id=" + encodeURIComponent(id)); } catch (e) { d.replaceChildren(emptyState("x", "Couldn't load this job", e.message)); return; }
+  if (jsel !== id) return;
+  renderDetail(j);
+  d.scrollTop = 0;
+}
+function closeDetail(){ jsel = null; $("v-jobs").classList.remove("detail"); for (const r of document.querySelectorAll(".jrow")) r.classList.remove("on"); }
+async function setStatus2(id, status, msg){
+  try { await send("api/jobs/status", "POST", {id, status}); toast(msg); } catch (e) { return toast(e.message, true); }
+  jsel = null; $("jdetail").replaceChildren(); $("v-jobs").classList.remove("detail"); listSig = ""; loadJobs(true);
+}
+function copyBtn(text){
+  const b = el("button", "btn ghost sm"); b.append(icon("copy"), el("span", null, "Copy"));
+  b.onclick = () => navigator.clipboard.writeText(text).then(() => toast("Copied"));
+  return b;
+}
+function answerInput(a){
+  let input;
+  const opts = a.options || [];
+  if (opts.length && opts.length <= 40) {
+    input = el("select", "inp");
+    for (const o of [""].concat(opts)) { const op = el("option", null, o || "Choose..."); op.value = o; input.append(op); }
+    if (a.kind !== "you" && a.a && !opts.includes(a.a)) { const op = el("option", null, a.a); op.value = a.a; input.append(op); }
+  } else input = el(a.kind === "draft" || (a.a || "").length > 70 ? "textarea" : "input", "inp");
+  const orig = a.kind === "you" ? "" : (a.a || "");
+  input.value = orig;
+  if (a.kind === "you" && input.tagName !== "SELECT") input.placeholder = /Application profile/.test(a.a || "") ? a.a : "Your answer";
+  return {input, orig};
+}
+const KINDTXT = {fact: "From your profile", draft: "Drafted by the local model. Check every claim.", you: "Needs your answer", legal: "Consent", file: "File", eeo: "Voluntary"};
+function renderDetail(j){
+  const d = $("jdetail"); d.replaceChildren();
+  const wrap = el("div", "jd");
+  const back = el("button", "btn ghost sm jback"); back.append(icon("back"), el("span", null, "Jobs")); back.onclick = closeDetail;
+  back.style.marginBottom = "12px";
+  wrap.append(back);
+  const h = el("div", "jdh");
+  const ht = el("div"); ht.style.flex = "1"; ht.style.minWidth = "0";
+  ht.append(el("h2", null, j.title), el("div", "jm", [j.company, j.location, j.level, j.years != null ? j.years + "+ years" : ""].filter(Boolean).join(" · ")));
+  h.append(ht, scoreRing(j.score, S || {strong: 72, good: 60}, true));
+  wrap.append(h);
+  const flags = el("div", "chips"); flags.style.marginTop = "10px";
+  const sc = statusChip(j.status); if (sc) flags.append(sc);
+  if (j.no_sponsorship) flags.append(el("span", "chip bad", "Won't sponsor"));
+  else if (j.sponsors) flags.append(el("span", "chip good", "Sponsors visas"));
+  if (flags.childNodes.length) wrap.append(flags);
+  if (j.summary) wrap.append(el("div", "jsum", j.summary));
   const has = j.has_skills || [], miss = j.missing_skills || [];
   if (has.length + miss.length) {
-    c.append(el("div", "thought", "Has " + has.length + " of " + (has.length + miss.length) + " required skills" + (has.length ? ": " + has.join(", ") : "")));
-    if (miss.length) c.append(el("div", "thought", "Missing: " + miss.join(", ")));
+    const sk = el("div", "chips skills");
+    for (const x of has) { const c = el("span", "chip good"); c.append(icon("check"), document.createTextNode(x)); sk.append(c); }
+    for (const x of miss) sk.append(el("span", "chip bad", x));
+    wrap.append(el("div", "muted small", "Has " + has.length + " of " + (has.length + miss.length) + " required skills"), sk);
   }
-  const body = el("div", "jbody");
-  c.append(body);
-  c.onclick = e => { if (!e.target.closest(".jbody")) toggleJob(j.id, body); };
-  if (openJob === j.id) toggleJob(j.id, body, true);
-  return c;
-}
-async function toggleJob(id, body, reopen){
-  if (!reopen && openJob === id) { openJob = null; body.replaceChildren(); return; }
-  if (openBody && openBody !== body) openBody.replaceChildren();
-  openJob = id; openBody = body;
-  let j;
-  try { const r = await fetch("api/jobs/detail?id=" + encodeURIComponent(id)); if (!r.ok) return; j = await r.json(); } catch (e) { return; }
-  body.replaceChildren();
+  // actions
+  const act = el("div", "actions");
   if (j.apply_url && j.apply_url.startsWith("https://")) {
-    const a = el("a", "applylink", "Open application");
-    a.href = j.apply_url; a.target = "_blank"; a.rel = "noopener noreferrer";
-    body.append(a);
+    const a = el("a", "btn ghost"); a.href = j.apply_url; a.target = "_blank"; a.rel = "noopener noreferrer";
+    a.append(icon("ext"), el("span", null, "Open application")); act.append(a);
   }
+  const STATUS_ACTIONS = {
+    new: [["skipped", "Skip", "Skipped"], ["applied", "Mark applied", "Marked applied"]],
+    approved: [["new", "Back to review", "Moved back to review"], ["applied", "Mark applied", "Marked applied"]],
+    applied: [["interview", "Interviewing", "Nice! Marked interviewing"], ["rejected", "Rejected", "Marked rejected"], ["new", "Back to new", "Moved back"]],
+    interview: [["rejected", "Rejected", "Marked rejected"], ["applied", "Back to applied", "Moved back"]],
+    rejected: [["new", "Back to new", "Moved back"]], skipped: [["new", "Back to new", "Moved back"]],
+  };
+  const reviewable = j.answers && j.status === "new" && j.auto_apply;
+  for (const [st, label, msg] of STATUS_ACTIONS[j.status] || []) {
+    if (reviewable && st === "skipped") continue;  // Skip sits next to Approve
+    const b = el("button", "btn ghost", label); b.onclick = () => setStatus2(j.id, st, msg); act.append(b);
+  }
+  wrap.append(act);
+  // emails
   if (j.emails && j.emails.length) {
-    body.append(el("div", "q", "Emails"));
-    for (const m of j.emails) body.append(mailCard(m, false));
+    const sec = el("div", "sec"); sec.append(el("div", "sech", "Emails"));
+    for (const m of j.emails) sec.append(mailCard(m, false));
+    wrap.append(sec);
   }
-  if (j.answers && j.status === "new" && j.auto_apply) reviewForm(j, body);
-  else if (j.answers) {
-    for (const a of j.answers) {
-      const row = el("div", "ans");
-      row.append(el("div", "q", (a.required ? "* " : "") + a.q), el("div", "tool", KIND[a.kind] || a.kind), pre(a.a || ""));
-      if (a.options && a.options.length) row.append(el("div", "thought", "Options: " + a.options.join(", ")));
-      if (a.kind === "fact" || a.kind === "draft") {
-        const b = el("button", "ghost", "Copy");
-        b.onclick = () => navigator.clipboard.writeText(a.a).then(() => { b.textContent = "Copied"; });
-        row.append(b);
-      }
-      body.append(row);
+  d.append(wrap);
+  if (reviewable) reviewForm(j, wrap, d);
+  else {
+    if (j.answers) readOnlyAnswers(j, wrap);
+    else {
+      const sec = el("div", "sec"); sec.append(el("div", "sech", "Answers"));
+      const b = el("button", "btn primary"); b.append(icon("sparkle"), el("span", null, "Prepare answers"));
+      b.onclick = async () => { b.disabled = true; b.lastChild.textContent = "Preparing, a few minutes..."; try { await send("api/jobs/prepare", "POST", {id: j.id}); toast("Preparing answers in the background"); } catch (e) { toast(e.message, true); } };
+      sec.append(el("div", "muted small", "No answers prepared for this job yet."), b);
+      sec.lastChild.style.marginTop = "10px";
+      wrap.append(sec);
     }
-    if (j.note) body.append(el("div", "thought", j.note));
-  } else {
-    const b = el("button", "ghost", "Prepare answers");
-    b.onclick = () => { b.disabled = true; b.textContent = "Preparing, a few minutes"; post("api/jobs/prepare", {id: id}); };
-    body.append(b);
+    posting(j, wrap);
   }
-  const d = el("details");
-  d.append(el("summary", null, "Posting text"), pre(j.description || ""));
-  body.append(d);
-  const btns = el("div", "btns");
-  for (const [label, st] of [["Applied", "applied"], ["Interviewing", "interview"], ["Rejected", "rejected"], ["Skip", "skipped"], ["Back to new", "new"]]) {
-    if ((st === "interview" || st === "rejected") && j.status === "new") continue;
-    if (st === j.status) continue;
-    const b = el("button", st === "applied" ? "approve" : "ghost", label);
-    b.onclick = () => post("api/jobs/status", {id: id, status: st}).then(() => { openJob = null; jobsSig = ""; loadJobs(); });
-    btns.append(b);
-  }
-  body.append(btns);
 }
-let applySig = "";
+function posting(j, wrap){
+  const dt = el("details", "sec"); dt.append(el("summary", null, "Posting text"), pre(j.description || "(none)"));
+  const gap = el("div"); gap.style.height = "28px";
+  wrap.append(dt, gap);
+}
+function readOnlyAnswers(j, wrap){
+  const groups = [["you", "Needs you"], ["legal", "Consents"], ["draft", "Drafts"], ["fact", "From your profile"], ["eeo", "Voluntary"], ["file", "Files"]];
+  for (const [k, title] of groups) {
+    const items = j.answers.filter(a => a.kind === k);
+    if (!items.length) continue;
+    const sec = el("div", "sec");
+    const hd = el("div", "sech", title); hd.append(el("span", "chip", String(items.length)));
+    sec.append(hd);
+    for (const a of items) {
+      const q = el("div", "q");
+      const ql = el("div", "ql"); if (a.required) ql.append(el("span", "req", "* ")); ql.append(document.createTextNode(a.q));
+      q.append(ql);
+      if (a.a) q.append(el("div", "qa" + (k === "fact" || k === "draft" ? "" : " muted"), a.a));
+      if ((k === "fact" || k === "draft") && a.a) { const c = copyBtn(a.a); c.style.marginTop = "8px"; q.append(c); }
+      sec.append(q);
+    }
+    wrap.append(sec);
+  }
+  if (j.note) wrap.append(el("div", "muted small", j.note));
+}
+function reviewForm(j, wrap, d){
+  const rows = [], consents = [];
+  const byKind = k => j.answers.filter(a => a.kind === k);
+  const need = byKind("you").sort((a, b) => (b.required ? 1 : 0) - (a.required ? 1 : 0));
+  const left = el("span", "left");
+  const refresh = () => {
+    const miss = rows.filter(r => r.need && !r.input.value.trim()).length + consents.filter(c => c.required && !c.box.checked).length;
+    left.textContent = miss ? miss + " required " + (miss === 1 ? "item" : "items") + " left" : "Ready to approve";
+    left.style.color = miss ? "var(--warn)" : "var(--good)";
+  };
+  const qbox = (a, withInput) => {
+    const q = el("div", "q");
+    const ql = el("div", "ql"); if (a.required) ql.append(el("span", "req", "* ")); ql.append(document.createTextNode(a.q));
+    q.append(ql, el("div", "qk", KINDTXT[a.kind] || a.kind));
+    if (withInput) {
+      const {input, orig} = answerInput(a);
+      q.append(input);
+      const r = {q: a.q, input, orig, need: a.required && a.kind === "you"};
+      if (r.need) q.classList.add("need");
+      input.addEventListener("input", () => { if (r.need) q.classList.toggle("need", !input.value.trim()); refresh(); });
+      input.addEventListener("change", () => { if (r.need) q.classList.toggle("need", !input.value.trim()); refresh(); });
+      rows.push(r);
+    }
+    return q;
+  };
+  const section = (title, count, extra) => {
+    const sec = el("div", "sec");
+    const hd = el("div", "sech", title); hd.append(el("span", "chip" + (extra || ""), String(count)));
+    sec.append(hd); wrap.append(sec); return sec;
+  };
+  if (need.length) { const sec = section("Needs you", need.length, " warn"); for (const a of need) sec.append(qbox(a, true)); }
+  const legal = byKind("legal");
+  if (legal.length) {
+    const sec = section("Statements you agree to", legal.length);
+    if (legal.length > 1) {
+      const all = el("button", "btn ghost sm", "Agree to all " + legal.length);
+      all.onclick = () => { for (const c of consents) c.box.checked = true; refresh(); };
+      all.style.marginLeft = "auto"; sec.firstChild.append(all);
+    }
+    for (const a of legal) {
+      const q = el("div", "q");
+      const lab = el("label", "consent");
+      const box = el("input"); box.type = "checkbox";
+      const txt = el("div");
+      const ql = el("div", "ql"); if (a.required) ql.append(el("span", "req", "* ")); ql.append(document.createTextNode(a.q));
+      txt.append(ql, el("div", "qk", a.required ? "Required to apply. Only tick it if it's true for you." : "Optional. Left blank unless you tick it."));
+      lab.append(box, txt); q.append(lab); sec.append(q);
+      box.onchange = refresh;
+      consents.push({q: a.q, box, required: a.required});
+    }
+  }
+  const drafts = byKind("draft");
+  if (drafts.length) { const sec = section("Drafts", drafts.length, " acc"); for (const a of drafts) sec.append(qbox(a, true)); }
+  const facts = byKind("fact");
+  if (facts.length) {
+    const dt = el("details", "sec");
+    const sm = el("summary", null, "From your profile"); sm.append(el("span", "chip good", String(facts.length)));
+    dt.append(sm);
+    for (const a of facts) dt.append(qbox(a, true));
+    wrap.append(dt);
+  }
+  const other = j.answers.filter(a => a.kind === "file" || a.kind === "eeo");
+  if (other.length) {
+    const dt = el("details", "sec");
+    dt.append(el("summary", null, "Resume and voluntary questions"));
+    for (const a of other) {
+      const q = el("div", "q");
+      q.append(el("div", "ql", a.q), el("div", "qa muted", a.kind === "file" ? "Your resume PDF is attached automatically." : "Voluntary. Left blank; set it in You › Application profile to share it."));
+      dt.append(q);
+    }
+    wrap.append(dt);
+  }
+  if (j.note) wrap.append(el("div", "muted small", j.note));
+  posting(j, wrap);
+  // sticky approve bar
+  const foot = el("div", "stickyfoot");
+  const skip = el("button", "btn ghost", "Skip");
+  skip.onclick = () => setStatus2(j.id, "skipped", "Skipped");
+  const ok = el("button", "btn primary"); ok.append(icon("check"), el("span", null, "Approve"));
+  ok.onclick = async () => {
+    const answers = rows.filter(r => r.input.value.trim() && r.input.value.trim() !== r.orig).map(r => ({q: r.q, a: r.input.value.trim()}));
+    const agreed = consents.filter(c => c.box.checked).map(c => c.q);
+    ok.disabled = true;
+    try { await send("api/jobs/approve", "POST", {id: j.id, answers, agreed}); }
+    catch (e) { ok.disabled = false; return toast(e.message, true); }
+    toast("Approved. It's in Apply to approved.");
+    jsel = null; $("jdetail").replaceChildren(); $("v-jobs").classList.remove("detail"); listSig = ""; applySig = ""; loadJobs(true);
+  };
+  foot.append(left, skip, ok);
+  d.append(foot);
+  refresh();
+}
 async function updateApply(n){
   const a = $("japply");
   if (!n) { a.style.display = "none"; applySig = ""; return; }
   if (applySig === String(n) && a.href) return;
   try {
-    const r = await (await fetch("api/jobs/next")).json();
+    const r = await api("api/jobs/next");
     if (!r.job || !r.job.apply_url.startsWith("https://")) { a.style.display = "none"; return; }
     a.href = r.job.apply_url + "#agent-auto";
-    a.textContent = "Apply to approved (" + r.left + ")";
+    a.querySelector(".long").textContent = "Apply to approved (" + r.left + ")";
+    a.querySelector(".short").textContent = "Apply (" + r.left + ")";
     a.style.display = "";
     applySig = String(n);
   } catch (e) {}
 }
-function reviewForm(j, body){
-  const rows = [], consents = [];
-  for (const a of j.answers) {
-    const row = el("div", "rv");
-    row.append(el("div", "q", (a.required ? "* " : "") + a.q));
-    if (a.kind === "file") { row.append(el("div", "tool", "Your resume PDF is attached.")); body.append(row); continue; }
-    if (a.kind === "legal") {
-      const lab = el("label", "tool");
-      const box = el("input"); box.type = "checkbox"; box.style.cssText = "width:auto;margin:0 6px 0 0;vertical-align:middle";
-      lab.append(box, document.createTextNode("I agree" + (a.required ? " (required to apply)" : " (optional, left blank if not ticked)")));
-      row.append(lab);
-      consents.push({q: a.q, box});
-      body.append(row);
-      continue;
-    }
-    if (a.kind === "eeo") { row.append(el("div", "tool", "Voluntary. Left blank; set it in the Profile tab to share it.")); body.append(row); continue; }
-    let input;
-    const opts = a.options || [];
-    if (opts.length && opts.length <= 30) {
-      input = el("select");
-      for (const o of [""].concat(opts)) { const op = el("option", null, o || "Choose"); op.value = o; input.append(op); }
-      if (a.kind !== "you" && a.a && !opts.includes(a.a)) { const op = el("option", null, a.a); op.value = a.a; input.append(op); }
-    } else {
-      input = el(a.kind === "draft" || (a.a || "").length > 60 ? "textarea" : "input");
-    }
-    const orig = a.kind === "you" ? "" : (a.a || "");
-    input.value = orig;
-    if (a.kind === "you" && input.tagName !== "SELECT") input.placeholder = a.a || "Your answer";
-    row.append(el("div", "tool", KIND[a.kind] || a.kind), input);
-    const need = a.required && a.kind === "you";
-    if (need) row.classList.add("need");
-    input.addEventListener("input", () => row.classList.toggle("need", need && !input.value.trim()));
-    rows.push({q: a.q, input, orig});
-    body.append(row);
+$("jrun").onclick = () => send("api/jobs/run", "POST").then(() => { toast("Search started"); setTimeout(() => loadJobs(), 600); }, e => toast(e.message, true));
+
+// ---------- inbox ----------
+const MAIL_KIND = {interview: ["good", "Interview"], rejection: ["bad", "Rejection"], confirmation: ["acc", "Application received"], verification: ["warn", "Verification"], other: ["", "Other"]};
+let inboxSig = "", ifilter = "all";
+function mailCard(m, withJob){
+  const c = el("div", "mail");
+  const top = el("div", "chips");
+  const k = MAIL_KIND[m.kind] || ["", m.kind];
+  top.append(el("span", "chip " + k[0], k[1]));
+  if (withJob && m.company) top.append(el("span", "chip", m.company));
+  c.append(top, el("div", "mt", m.subject || "(no subject)"), el("div", "muted small", [m.from, when(m.date), withJob && m.title ? m.title : ""].filter(Boolean).join(" · ")));
+  if (m.code) {
+    c.append(el("div", "code", m.code));
+    const b = copyBtn(m.code); b.lastChild.textContent = "Copy code"; c.append(b);
   }
-  if (j.note) body.append(el("div", "thought", j.note));
-  const btns = el("div", "btns");
-  const ok = el("button", "approve", "Approve");
-  ok.onclick = async () => {
-    const answers = rows.filter(r => r.input.value.trim() && r.input.value.trim() !== r.orig).map(r => ({q: r.q, a: r.input.value.trim()}));
-    const agreed = consents.filter(c => c.box.checked).map(c => c.q);
-    ok.disabled = true;
-    const r = await fetch("api/jobs/approve", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({id: j.id, answers, agreed})});
-    ok.disabled = false;
-    if (!r.ok) { const t = await r.json().catch(() => ({})); alert(t.detail || ("Error " + r.status)); return; }
-    openJob = null; jobsSig = ""; applySig = ""; loadJobs();
-  };
-  if (consents.length > 1) {
-    const all = el("button", "ghost", "Agree to all " + consents.length);
-    all.onclick = () => { for (const c of consents) c.box.checked = true; };
-    btns.append(all);
-  }
-  btns.append(ok);
-  body.append(btns);
+  if (m.snippet) { const d = el("details"); d.style.marginTop = "6px"; d.append(el("summary", null, "Email text"), pre(m.snippet)); c.append(d); }
+  return c;
 }
-$("jfilter").onchange = () => { openJob = null; jobsSig = ""; loadJobs(); };
-$("jrun").onclick = () => post("api/jobs/run").then(() => setTimeout(loadJobs, 500));
+function inboxSetup(box){
+  const c = el("div", "card");
+  const h = el("div"); h.style.cssText = "display:flex;align-items:center;gap:10px;margin-bottom:8px";
+  const lg = el("div", "logo"); lg.append(icon("mail")); h.append(lg, el("b", null, "Connect the agent's inbox"));
+  c.append(h, el("div", "muted small", "An address just for applications. Every 5 minutes the agent reads new mail without marking it read: confirmations mark jobs Applied, interview requests and rejections move them along, and verification codes show up here and as alerts. Links in emails are never opened. Use an app password: Gmail › Google Account › Security › App passwords. Your profile's email becomes this address."));
+  const addr = el("input", "inp"); addr.type = "email"; addr.placeholder = "you.applications@gmail.com"; addr.autocomplete = "off";
+  const pw = el("input", "inp"); pw.type = "password"; pw.placeholder = "App password"; pw.autocomplete = "new-password";
+  const f1 = el("div", "field"); f1.append(el("label", null, "Address"), addr);
+  const f2 = el("div", "field"); f2.append(el("label", null, "App password"), pw);
+  f1.style.marginTop = "14px";
+  const b = el("button", "btn primary", "Connect");
+  b.onclick = async () => {
+    b.disabled = true; b.textContent = "Checking the login...";
+    try { await send("api/inbox", "POST", {address: addr.value, password: pw.value}); pw.value = ""; toast("Inbox connected"); inboxSig = ""; loadInbox(); }
+    catch (e) { toast(e.message, true); }
+    b.disabled = false; b.textContent = "Connect";
+  };
+  c.append(f1, f2, b);
+  box.append(c);
+}
+async function loadInbox(){
+  let s;
+  try { s = await api("api/inbox"); } catch (e) { return; }
+  const fresh = (s.messages || []).filter(m => (m.kind === "interview" || m.kind === "verification") && m.date > (store("inboxSeen") || ""));
+  badge("inbox", fresh.length);
+  if (view !== "inbox") return;
+  if (s.messages && s.messages[0]) store("inboxSeen", s.messages[0].date);
+  badge("inbox", 0);
+  const sig = JSON.stringify(s) + ifilter;
+  if (sig === inboxSig) return;
+  inboxSig = sig;
+  const box = $("ibody"); box.replaceChildren();
+  $("icheck").style.display = $("ioff").style.display = s.configured ? "" : "none";
+  $("ifilterbar").style.display = s.configured ? "" : "none";
+  if (!s.configured) { $("imeta").textContent = ""; return inboxSetup(box); }
+  $("imeta").textContent = s.address + " · checked " + (when(s.checked) || "not yet");
+  if (s.error) box.append(el("div", "chip bad", s.error));
+  const f = $("ifilter"); f.replaceChildren();
+  const cnt = {all: s.messages.length};
+  for (const m of s.messages) cnt[m.kind] = (cnt[m.kind] || 0) + 1;
+  for (const [k, label] of [["all", "All"], ["interview", "Interviews"], ["verification", "Codes"], ["confirmation", "Received"], ["rejection", "Rejections"], ["other", "Other"]]) {
+    const b = el("button", k === ifilter ? "on" : ""); b.append(document.createTextNode(label));
+    if (cnt[k]) b.append(el("span", "n", String(cnt[k])));
+    b.onclick = () => { ifilter = k; inboxSig = ""; loadInbox(); };
+    f.append(b);
+  }
+  const list = s.messages.filter(m => ifilter === "all" || m.kind === ifilter);
+  if (!list.length) box.append(emptyState("inbox", "No emails here", "Emails about your applications show up here."));
+  for (const m of list) box.append(mailCard(m, true));
+}
+$("icheck").onclick = async () => {
+  $("icheck").disabled = true;
+  try { const r = await send("api/inbox/check", "POST"); toast(r.new ? r.new + " new" : "No new mail"); } catch (e) { toast(e.message, true); }
+  $("icheck").disabled = false; inboxSig = ""; loadInbox();
+};
+$("ioff").onclick = async () => {
+  if (!confirm("Disconnect the inbox? The saved login and the email list are deleted from the server.")) return;
+  await fetch("api/inbox", {method: "DELETE"}); inboxSig = ""; loadInbox();
+};
+
+// ---------- you: profile and memory ----------
+function showYou(sub){
+  store("yousub", sub);
+  for (const b of $("yousub").children) b.classList.toggle("on", b.dataset.s === sub);
+  $("y-profile").style.display = sub === "profile" ? "" : "none";
+  $("y-memory").style.display = sub === "memory" ? "" : "none";
+  if (sub === "profile") loadProfile(); else loadMemory();
+}
+for (const b of $("yousub").children) b.onclick = () => showYou(b.dataset.s);
+let profileDirty = false;
+function pInput(value, choices, multi){
+  let input;
+  if (choices) {
+    input = el("select", "inp");
+    const opts = [""].concat(choices);
+    if (value && !choices.includes(value)) opts.push(value);
+    for (const c of opts) { const o = el("option", null, c || "Choose..."); o.value = c; input.append(o); }
+  } else if (multi) input = el("textarea", "inp");
+  else { input = el("input", "inp"); input.autocomplete = "off"; }
+  input.value = value || "";
+  return input;
+}
+function pField(label, input, help, wide){
+  const f = el("div", "field pfield" + (input.value ? "" : " empty") + (wide ? " wide" : ""));
+  f.append(el("label", null, label), input);
+  if (help) f.append(el("div", "help", help));
+  const on = () => { profileDirty = true; f.classList.toggle("empty", !input.value.trim()); $("pdirty").textContent = "Unsaved changes"; progress(); };
+  input.addEventListener("input", on); input.addEventListener("change", on);
+  return f;
+}
+function progress(){
+  const all = [...$("pform").querySelectorAll("[data-key]")];
+  const filled = all.filter(i => i.value.trim()).length;
+  $("pbar").style.width = (all.length ? Math.round(filled / all.length * 100) : 0) + "%";
+  $("pstat").textContent = filled + " of " + all.length + " filled";
+}
+async function loadProfile(){
+  if (profileDirty) return;
+  let p;
+  try { p = await api("api/jobs/profile"); } catch (e) { return; }
+  const box = $("pform"), jump = $("pjump");
+  box.replaceChildren(); jump.replaceChildren();
+  const sections = p.form.map(s => [s.section, s.fields]);
+  let n = 0;
+  for (const [name, fields] of sections) {
+    const id = "ps" + (n++);
+    const sec = el("div", "psec"); sec.id = id;
+    sec.append(el("h3", null, name));
+    const grid = el("div", "pgrid");
+    for (const f of fields) {
+      const input = pInput(p.profile[f.key], f.choices, false);
+      input.dataset.key = f.key;
+      grid.append(pField(f.label, input, f.help, (f.help || "").length > 70));
+    }
+    sec.append(grid); box.append(sec);
+    const j = el("button", "chip", name); j.onclick = () => sec.scrollIntoView({behavior: "smooth", block: "start"}); jump.append(j);
+  }
+  const extra = [["Questions it still can't answer", p.unanswered, "q"], ["Your saved answers", p.answers, "a"]];
+  for (const [name, items, kind] of extra) {
+    const sec = el("div", "psec"); sec.id = "ps" + (n++);
+    const h = el("h3", null, name); h.append(el("span", "chip" + (kind === "q" && items.length ? " warn" : ""), String(items.length)));
+    sec.append(h);
+    if (kind === "q") sec.append(el("div", "muted small", items.length ? "From the " + p.prepared_jobs + " jobs with prepared answers, most common first. Answer once and every form that asks gets it. Leave empty to skip." : "None right now. Questions show up here as jobs get prepared."));
+    if (kind === "a" && !items.length) sec.append(el("div", "muted small", "None yet. Clear one to remove it."));
+    const grid = el("div"); grid.style.marginTop = "12px";
+    for (const u of items) {
+      if (kind === "q") {
+        const input = pInput("", u.options.length && u.options.length <= 12 ? u.options : null, !u.options.length);
+        input.dataset.q = u.q;
+        const where = u.jobs + (u.jobs === 1 ? " job" : " jobs") + ": " + u.companies.join(", ");
+        grid.append(pField(u.q, input, where + (u.options.length > 12 ? ". Choices include " + u.options.slice(0, 6).join(", ") : ""), true));
+      } else {
+        const input = pInput(u.a, null, true); input.dataset.q = u.q;
+        grid.append(pField(u.q, input, "", true));
+      }
+    }
+    sec.append(grid); box.append(sec);
+    const j = el("button", "chip" + (kind === "q" && items.length ? " warn" : ""), kind === "q" ? "Open questions" : "Saved answers");
+    j.onclick = () => sec.scrollIntoView({behavior: "smooth", block: "start"}); jump.append(j);
+  }
+  $("pdirty").textContent = "";
+  progress();
+}
+$("psave").onclick = async () => {
+  const values = {}, answers = [];
+  for (const i of $("pform").querySelectorAll("[data-key]")) values[i.dataset.key] = i.value.trim();
+  for (const i of $("pform").querySelectorAll("[data-q]")) if (i.value.trim()) answers.push({q: i.dataset.q, a: i.value.trim()});
+  try { await send("api/jobs/profile", "PUT", {values, answers}); } catch (e) { return toast(e.message, true); }
+  profileDirty = false; toast("Profile saved"); loadProfile();
+};
+let memMax = 2000;
+function memCount(){ const n = $("memtext").value.length; $("memcount").textContent = n + " / " + memMax + " characters"; }
+async function loadMemory(){
+  try { const m = await api("api/memory"); $("memtext").value = m.text; memMax = m.max; } catch (e) {}
+  memCount();
+}
+$("memtext").oninput = memCount;
+$("memsave").onclick = async () => {
+  try { await send("api/memory", "PUT", {text: $("memtext").value}); toast("Memory saved"); } catch (e) { toast(e.message, true); }
+};
+
+// ---------- start ----------
 if ("serviceWorker" in navigator) navigator.serviceWorker.addEventListener("message", e => { if (e.data && e.data.view) showView(e.data.view); });
+window.addEventListener("hashchange", () => { const v = location.hash.slice(1); if (v && (OLD[v] || v) !== view) showView(v); });
 setInterval(() => { if (view === "jobs") loadJobs(); }, 5000);
-window.addEventListener("hashchange", () => { const v = location.hash.slice(1); if (v !== view) showView(v); });
-let startView = location.hash.slice(1);
-if (!VIEWS.includes(startView)) { try { startView = localStorage.getItem("view") || "chat"; } catch (e) { startView = "chat"; } }
+setInterval(() => { if (view !== "jobs") loadJobs(); loadInbox(); }, 60000);
+setInterval(() => { if (view === "inbox") loadInbox(); }, 15000);
+let startView = location.hash.slice(1) || store("view") || "chat";
 showView(startView);
 setInterval(poll, 1500);
 poll();
+loadJobs();
+loadInbox();
 setupAlerts();
 </script>
 </body></html>
@@ -2232,7 +2767,7 @@ FILL_SCRIPT = r"""// ==UserScript==
     stopped = false;
     const res = await run();
     if (!res || !res.job) return;
-    if (!res.approved) return body.append(row(node("div", "Not approved in the panel, so it won't be submitted. Review it in the Jobs tab.", "color:#e08a1e")));
+    if (!res.approved) return body.append(row(node("div", "Not approved in the panel, so it won't be submitted. Review it in the Jobs tab of the panel.", "color:#e08a1e")));
     await sleep(1200);  // let the form settle after the last choices
     const missing = missingRequired();
     if (missing.length) {

@@ -794,7 +794,7 @@ def answer_for(label, fields, profile, company=""):
         if str(profile.get(key, "")).strip():  # "None" counts as filled in
             return {"kind": "fact", "a": "Yes" if in_list(company, profile[key]) else "No", "options": options}
         return {"kind": "you", "field": key,
-                "a": "Fill in the company lists in the Profile tab, or answer this yourself."}
+                "a": "Fill in the company lists under You > Application profile, or answer this yourself."}
     if PAST_RE.search(label) and not re.search(r"government|military|state.owned", label, re.I):
         return {"kind": "you", "a": "Answer this yourself."}
     if EXPERIENCE_RE.search(label):  # "Do you possess 2 years of experience in X?" is about skills
@@ -808,7 +808,7 @@ def answer_for(label, fields, profile, company=""):
             value = str(profile.get(key) or profile.get(FALLBACK.get(key, ""), "")).strip()
             if not value:
                 return {"kind": "you", "field": key,
-                        "a": f"Fill in \"{PROFILE_LABELS.get(key, key)}\" in the Profile tab, or answer this yourself."}
+                        "a": f"Fill in \"{PROFILE_LABELS.get(key, key)}\" under You > Application profile, or answer this yourself."}
             if options and not fits_options(value, options):
                 return {"kind": "you", "a": f"Your answer ({value}) isn't one of the choices.", "options": options}
             return {"kind": "fact", "a": value, "options": options}
