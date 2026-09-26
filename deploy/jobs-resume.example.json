@@ -1,0 +1,62 @@
+{
+ "name": "Your Name",
+ "location": "City, State, United States",
+ "email": "you@example.com",
+ "phone": "(555) 555-0100",
+ "links": [
+  {
+   "label": "GitHub",
+   "url": "https://github.com/you"
+  },
+  {
+   "label": "LinkedIn",
+   "url": "https://www.linkedin.com/in/you"
+  }
+ ],
+ "summary": "Two or three sentences about you. The agent rewrites this per job from what's below.",
+ "skills": [
+  {
+   "group": "Languages",
+   "items": [
+    "Java",
+    "Python"
+   ]
+  },
+  {
+   "group": "Cloud & DevOps",
+   "items": [
+    "AWS",
+    "Docker"
+   ]
+  }
+ ],
+ "projects": [
+  {
+   "name": "Project name",
+   "subtitle": "What it is (stack)",
+   "bullets": [
+    "What you did and how. Bullets are used word for word."
+   ]
+  }
+ ],
+ "experience": [
+  {
+   "title": "Job title",
+   "org": "Company",
+   "dates": "Jan 2024 – Jun 2024",
+   "bullets": [
+    "What you did."
+   ]
+  }
+ ],
+ "education": [
+  {
+   "degree": "Master of Science, Computer Science",
+   "school": "University",
+   "dates": "Aug 2024 – May 2026"
+  }
+ ],
+ "certifications": [
+  "Certificate, Issuer, Month Year"
+ ]
+}

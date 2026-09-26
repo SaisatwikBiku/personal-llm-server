@@ -753,12 +753,65 @@ def jobs_fill(body: FillIn, request: Request):
 
 
 @app.get("/api/jobs/resume")
-def jobs_resume(request: Request):
+def jobs_resume(request: Request, id: str = "", kind: str = "resume"):
+    """A document for the autofill script to attach: the job's tailored resume or cover
+    letter, or the usual resume.pdf."""
     check_user(request)
-    data = jobs.resume_pdf()
+    if kind not in ("resume", "cover"):
+        raise HTTPException(400, "kind is resume or cover")
+    data, name = jobs.doc_file(id, kind)
     if data is None:
-        raise HTTPException(404, "No resume.pdf in the jobs folder")
-    return {"data": base64.b64encode(data).decode()}
+        raise HTTPException(404, "No such document")
+    return {"data": base64.b64encode(data).decode(), "name": name}
+
+
+@app.get("/api/jobs/doc")
+def jobs_doc(id: str, kind: str, request: Request):
+    """The same documents as PDFs, to open and read in the panel."""
+    check_user(request)
+    if kind not in ("resume", "cover"):
+        raise HTTPException(400, "kind is resume or cover")
+    data, name = jobs.doc_file(id, kind)
+    if data is None:
+        raise HTTPException(404, "No such document")
+    return Response(data, media_type="application/pdf",
+                    headers={"Content-Disposition": f'inline; filename="{name}"', "Cache-Control": "no-store"})
+
+
+class DocsIn(BaseModel):
+    id: str
+    summary: str = ""
+    cover: str = ""
+
+
+@app.post("/api/jobs/docs")
+def jobs_docs_make(body: DocsIn, request: Request):
+    """Tailor the resume and draft the cover letter for one job, in the background."""
+    check_user(request)
+    if not jobs.load_resume():
+        raise HTTPException(409, "No resume.json in the jobs folder yet")
+    if not jobs.detail(body.id):
+        raise HTTPException(404, "No such job")
+    threading.Thread(target=jobs.make_docs, args=(body.id, panel_busy), daemon=True).start()
+    return {"ok": True}
+
+
+@app.put("/api/jobs/docs")
+def jobs_docs_save(body: DocsIn, request: Request):
+    check_user(request)
+    if not jobs.save_docs(body.id, body.summary, body.cover):
+        raise HTTPException(404, "No documents for this job")
+    return {"ok": True}
+
+
+@app.post("/api/jobs/stop")
+def jobs_stop(request: Request):
+    """End the running search at its next step; what's saved so far stays."""
+    check_user(request)
+    if not jobs.progress["running"]:
+        raise HTTPException(409, "No search is running")
+    jobs.progress["stop"] = True
+    return {"ok": True}
 
 
 @app.get("/jobs-fill.user.js")
@@ -1202,6 +1255,14 @@ details[open]>summary::before{transform:rotate(45deg)}
 .consent input{width:20px;height:20px;accent-color:var(--accent);margin-top:1px;flex:none}
 .stickyfoot{position:sticky;bottom:0;margin-top:auto;padding:12px 26px calc(12px + env(safe-area-inset-bottom,0px));background:linear-gradient(to top,var(--bg) 70%,transparent);display:flex;gap:8px;align-items:center;flex-wrap:wrap}
 .stickyfoot .left{font-size:13px;color:var(--muted);flex:1;min-width:140px}
+.docs{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.doc{display:flex;gap:12px;align-items:center;padding:14px;border:1px solid var(--line);border-radius:12px;background:var(--surface);box-shadow:var(--shadow);text-decoration:none;color:var(--fg);transition:border-color .15s,transform .08s}
+.doc:hover{border-color:var(--accent)}
+.doc:active{transform:scale(.98)}
+.doc .dic{width:40px;height:48px;border-radius:8px;background:linear-gradient(160deg,var(--accent-soft),transparent);border:1px solid var(--line);display:grid;place-items:center;color:var(--accent);flex:none}
+.doc b{display:block;font-size:14px}
+.doc span{font-size:12px;color:var(--muted)}
+@media (max-width: 860px){.docs{grid-template-columns:1fr}}
 .mail{padding:14px;border:1px solid var(--line);border-radius:12px;background:var(--surface);margin-bottom:8px;box-shadow:var(--shadow)}
 .mail .mt{font-weight:650;margin:6px 0 2px}
 .mail .code{font:700 26px ui-monospace,"SF Mono",Menlo,monospace;letter-spacing:4px;margin:8px 0}
@@ -1418,7 +1479,8 @@ const ICONS = {
   back: "M15 18l-6-6 6-6", send: "M5 12h14M13 6l6 6-6 6", ext: "M14 4h6v6M20 4l-9 9M18 14v5H5V6h5", copy: "M8 8h11v11H8zM5 16V5h11",
   check: "M5 12l5 5 9-10", x: "M6 6l12 12M18 6L6 18", mail: "M3 6h18v12H3zM3 7l9 6 9-6",
   sparkle: "M12 3l2.4 5.6L20 11l-5.6 2.4L12 19l-2.4-5.6L4 11l5.6-2.4z", sun: "M12 17a5 5 0 100-10 5 5 0 000 10zM12 1v2M12 21v2M4.2 4.2l1.4 1.4M18.4 18.4l1.4 1.4M1 12h2M21 12h2M4.2 19.8l1.4-1.4M18.4 5.6l1.4-1.4",
-  moon: "M21 12.8A9 9 0 1111.2 3a7 7 0 009.8 9.8z", bell: "M6 8a6 6 0 1112 0c0 7 3 9 3 9H3s3-2 3-9M10 21h4",
+  moon: "M21 12.8A9 9 0 1111.2 3a7 7 0 009.8 9.8z", doc: "M7 3h7l5 5v13H7zM14 3v5h5M10 13h6M10 17h6", stop: "M7 7h10v10H7z",
+  refresh: "M20 12a8 8 0 11-2.3-5.7M20 4v5h-5", bell: "M6 8a6 6 0 1112 0c0 7 3 9 3 9H3s3-2 3-9M10 21h4",
 };
 function icon(name){ const s = document.createElementNS(SVGNS, "svg"); s.setAttribute("viewBox", "0 0 24 24"); const p = document.createElementNS(SVGNS, "path"); p.setAttribute("d", ICONS[name]); s.append(p); return s; }
 let toastTimer;
@@ -1814,7 +1876,12 @@ async function loadJobs(force){
   badge("jobs", c.review);
   if (view !== "jobs") return;
   $("jmeta").textContent = jobsMeta(s);
-  $("jrun").disabled = s.progress.running || !s.configured;
+  const jr = $("jrun");
+  jr.disabled = !s.configured;
+  jr.dataset.mode = s.progress.running ? "stop" : "run";
+  jr.replaceChildren(icon(s.progress.running ? "stop" : "refresh"));
+  jr.title = s.progress.running ? "Stop the search" : "Run the search now";
+  jr.classList.toggle("danger", s.progress.running); jr.classList.toggle("ghost", !s.progress.running);
   // stats
   const st = $("jstats"); st.replaceChildren();
   for (const [k, label, hl] of [["review", "To review", true], ["approved", "Approved"], ["applied", "Applied"], ["interview", "Interviews"]]) {
@@ -1853,6 +1920,7 @@ function renderList(list, s){
     const chips = el("div", "chips");
     const sc = statusChip(j.status); if (sc && jfilter !== j.status) chips.append(sc);
     if (j.prepared && j.status === "new") chips.append(el("span", "chip acc", "Answers ready"));
+    if (j.docs && j.status === "new") chips.append(el("span", "chip acc", "Resume + letter"));
     if (j.no_sponsorship) chips.append(el("span", "chip bad", "No sponsorship"));
     else if (j.sponsors) chips.append(el("span", "chip good", "Sponsors"));
     if (j.level) chips.append(el("span", "chip", j.level));
@@ -1947,6 +2015,7 @@ function renderDetail(j){
     for (const m of j.emails) sec.append(mailCard(m, false));
     wrap.append(sec);
   }
+  if (j.auto_apply || j.docs) { const box = el("div", "sec"); wrap.append(box); renderDocs(box, j); }
   d.append(wrap);
   if (reviewable) reviewForm(j, wrap, d);
   else {
@@ -1961,6 +2030,70 @@ function renderDetail(j){
     }
     posting(j, wrap);
   }
+}
+// The tailored resume and cover letter: open the PDFs, edit the summary and the letter.
+function docTile(j, kind, title, sub){
+  const a = el("a", "doc");
+  a.href = "api/jobs/doc?id=" + encodeURIComponent(j.id) + "&kind=" + kind + "&t=" + Date.now();
+  a.target = "_blank"; a.rel = "noopener";
+  const ic = el("div", "dic"); ic.append(icon("doc"));
+  const t = el("div"); t.append(el("b", null, title), el("span", null, sub));
+  const go = icon("ext"); go.style.marginLeft = "auto"; go.style.color = "var(--muted)";
+  a.append(ic, t, go);
+  return a;
+}
+function renderDocs(box, j){
+  box.replaceChildren();
+  const hd = el("div", "sech", "Resume and cover letter");
+  box.append(hd);
+  const dc = j.docs;
+  if (!dc) {
+    box.append(el("div", "muted small", "No tailored documents yet. Without them the autofill attaches your usual resume and no cover letter."));
+    const b = el("button", "btn ghost"); b.append(icon("sparkle"), el("span", null, "Make resume and cover letter"));
+    b.style.marginTop = "10px";
+    b.onclick = () => makeDocs(j, box, b);
+    box.append(b);
+    return;
+  }
+  const tiles = el("div", "docs");
+  tiles.append(docTile(j, "resume", "Tailored resume", "PDF · projects and skills ordered for this job"),
+               docTile(j, "cover", "Cover letter", "PDF · drafted by the local model"));
+  box.append(tiles);
+  for (const w of dc.warnings || []) { const c = el("div", "chip warn", w); c.style.cssText = "margin-top:8px;height:auto;padding:4px 10px;white-space:normal"; box.append(c); }
+  const dt = el("details"); dt.style.marginTop = "10px";
+  dt.append(el("summary", null, "Edit the summary and the cover letter"));
+  const sum = el("textarea", "inp"); sum.value = dc.summary || ""; sum.style.minHeight = "96px";
+  const cov = el("textarea", "inp"); cov.value = dc.cover || ""; cov.style.minHeight = "280px";
+  const f1 = el("div", "field"); f1.append(el("label", null, "Resume summary"), sum, el("div", "help", "Your bullets stay as they are; only this summary and the order of projects and skills change per job."));
+  const f2 = el("div", "field"); f2.append(el("label", null, "Cover letter"), cov, el("div", "help", "Check every claim. Blank lines start new paragraphs."));
+  const row = el("div", "actions");
+  const save = el("button", "btn primary", "Save changes");
+  save.onclick = async () => {
+    try { await send("api/jobs/docs", "PUT", {id: j.id, summary: sum.value, cover: cov.value}); } catch (e) { return toast(e.message, true); }
+    j.docs.summary = sum.value; j.docs.cover = cov.value;
+    toast("Saved. The PDFs now use your changes.");
+    renderDocs(box, j);
+  };
+  const remake = el("button", "btn ghost", "Make them again");
+  remake.onclick = () => { if (confirm("Make a new summary and cover letter? Your edits here are replaced.")) makeDocs(j, box, remake); };
+  row.append(save, remake);
+  f1.style.marginTop = "12px";
+  dt.append(f1, f2, row);
+  box.append(dt);
+}
+async function makeDocs(j, box, btn){
+  try { await send("api/jobs/docs", "POST", {id: j.id}); } catch (e) { return toast(e.message, true); }
+  btn.disabled = true;
+  btn.lastChild.textContent = "Writing, about 2 minutes...";
+  const was = j.docs && j.docs.made;
+  for (let t = 0; t < 40; t++) {  // up to 10 minutes: the model may be busy with a chat
+    await new Promise(r => setTimeout(r, 15000));
+    if (jsel !== j.id || !box.isConnected) return;
+    let fresh;
+    try { fresh = await api("api/jobs/detail?id=" + encodeURIComponent(j.id)); } catch (e) { continue; }
+    if (fresh.docs && fresh.docs.made !== was) { j.docs = fresh.docs; toast("Resume and cover letter ready"); return renderDocs(box, j); }
+  }
+  btn.disabled = false; btn.lastChild.textContent = "Still working. Check back later";
 }
 function posting(j, wrap){
   const dt = el("details", "sec"); dt.append(el("summary", null, "Posting text"), pre(j.description || "(none)"));
@@ -2093,7 +2226,13 @@ async function updateApply(n){
     applySig = String(n);
   } catch (e) {}
 }
-$("jrun").onclick = () => send("api/jobs/run", "POST").then(() => { toast("Search started"); setTimeout(() => loadJobs(), 600); }, e => toast(e.message, true));
+$("jrun").onclick = () => {
+  if ($("jrun").dataset.mode === "stop") {
+    if (!confirm("Stop the search? What it found so far is kept; the rest waits for the next run.")) return;
+    return send("api/jobs/stop", "POST").then(() => { toast("Stopping after the current step"); setTimeout(() => loadJobs(), 800); }, e => toast(e.message, true));
+  }
+  send("api/jobs/run", "POST").then(() => { toast("Search started"); setTimeout(() => loadJobs(), 600); }, e => toast(e.message, true));
+};
 
 // ---------- inbox ----------
 const MAIL_KIND = {interview: ["good", "Interview"], rejection: ["bad", "Rejection"], confirmation: ["acc", "Application received"], verification: ["warn", "Verification"], other: ["", "Other"]};
@@ -2300,7 +2439,7 @@ setupAlerts();
 FILL_SCRIPT = r"""// ==UserScript==
 // @name         Agent application autofill
 // @namespace    local-agent
-// @version      4
+// @version      5
 // @description  Fills job application forms from the agent panel, and submits the ones you approved there.
 // @match        https://job-boards.greenhouse.io/*
 // @match        https://boards.greenhouse.io/*
@@ -2395,7 +2534,7 @@ FILL_SCRIPT = r"""// ==UserScript==
         els.push(el);
         continue;
       }
-      if (type === "file") { fields.push({label: fileLabel(el), type: "file", options: []}); els.push(el); continue; }
+      if (type === "file") { fields.push({label: fileLabel(el), type: "file", options: [], name: el.id || el.name || ""}); els.push(el); continue; }
       if (el.getAttribute("aria-hidden") === "true" || el.tabIndex < 0) continue;  // validation helpers
       if (type === "radio") {
         if (!el.name || radios.has(el.name)) continue;
@@ -2571,8 +2710,9 @@ FILL_SCRIPT = r"""// ==UserScript==
     target.style.outlineOffset = "2px";
   }
 
-  async function attachResume(el, name) {
-    const {data} = await api("GET", "/api/jobs/resume");
+  // The job's tailored resume or cover letter from the panel, or the usual resume
+  async function attachDoc(el, kind, jobId) {
+    const {data, name} = await api("GET", "/api/jobs/resume?kind=" + kind + (jobId ? "&id=" + encodeURIComponent(jobId) : ""));
     const bytes = Uint8Array.from(atob(data), c => c.charCodeAt(0));
     const dt = new DataTransfer();
     dt.items.add(new File([bytes], name, {type: "application/pdf"}));
@@ -2634,8 +2774,8 @@ FILL_SCRIPT = r"""// ==UserScript==
     // the resume first: some forms fill fields from it and would overwrite ours
     for (const a of res.answers) {
       if (a.kind !== "file" || fields[a.i].type !== "file") continue;
-      try { await attachResume(els[a.i], res.resume_name); mark(els[a.i], "filled"); counts.filled++; }
-      catch (e) { todo.push([fields[a.i].label, "Resume: " + e.message]); mark(els[a.i], "you"); counts.you++; }
+      try { await attachDoc(els[a.i], a.doc || "resume", res.job && res.job.id); mark(els[a.i], "filled"); counts.filled++; }
+      catch (e) { todo.push([fields[a.i].label, (a.doc === "cover" ? "Cover letter: " : "Resume: ") + e.message]); mark(els[a.i], "you"); counts.you++; }
       await sleep(1500);
     }
     for (const a of res.answers) {
@@ -2812,6 +2952,6 @@ FILL_SCRIPT = r"""// ==UserScript==
       }
     }, 500);
   }
-  window.__agentFill = {collect, put, mark, attachResume, run, missingRequired, submitButton};  // for testing from the console
+  window.__agentFill = {collect, put, mark, attachDoc, run, missingRequired, submitButton};  // for testing from the console
 })();
 """

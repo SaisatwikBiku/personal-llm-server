@@ -75,6 +75,7 @@ DEFAULTS = {
     "draft_model": "qwen3:8b",  # the 4B invented project details in drafts; the 8B stuck to the resume
     "max_drafts_per_run": 15,
     "queue_size": 50,          # applications in the morning review list
+    "tailor_docs": True,       # tailored resume and cover letter for jobs the autofill can submit
     "good_score": 60,
     "strong_score": 72,
 }
@@ -891,7 +892,13 @@ def prepare(job, profile, resume, is_busy, model, max_drafts=3):
 
 # ---------- run ----------
 
+class Stopped(Exception):
+    pass
+
+
 def set_progress(step, done=None, total=None):
+    if progress.get("stop"):  # Stop in the panel: end the run at the next step
+        raise Stopped()
     progress["step"] = step
     if done is not None:
         progress["done"] = done
@@ -903,11 +910,13 @@ def run(is_busy=lambda: False):
     """One full pass: fetch, filter, score, prepare. Returns a stats dict."""
     if not run_lock.acquire(blocking=False):
         return {"error": "A job search is already running."}
-    progress.update(running=True, step="starting", done=0, total=0)
+    progress.update(running=True, step="starting", done=0, total=0, stop=False)
     try:
         return _run(is_busy)
+    except Stopped:
+        return {"stopped": True}
     finally:
-        progress.update(running=False, step="")
+        progress.update(running=False, step="", stop=False)
         run_lock.release()
 
 
@@ -1014,17 +1023,23 @@ def _run(is_busy):
                          if j["status"] == "new" and j.get("answers") is None
                          and (j.get("score") or 0) >= cfg["good_score"]),
                         key=lambda j: (not auto_apply_ok(j), -j["score"]))[:cfg["max_drafts_per_run"]]
-    for i, job in enumerate(strong, 1):
-        set_progress(f"preparing {job['company']}: {job['title']}", i, len(strong))
-        answers, note = prepare(job, profile, resume, is_busy, cfg["draft_model"])
-        stats["drafted"] += 1
+    resume_data = load_resume() if cfg["tailor_docs"] else None
+    try:
+        for i, job in enumerate(strong, 1):
+            set_progress(f"preparing {job['company']}: {job['title']}", i, len(strong))
+            answers, note = prepare(job, profile, resume, is_busy, cfg["draft_model"])
+            docs = tailor(job, resume_data, is_busy, cfg["draft_model"]) if resume_data and auto_apply_ok(job) else None
+            stats["drafted"] += 1
 
-        def save_answers(db, jid=job["id"], a=answers, n=note):
-            if jid in db["jobs"]:
-                db["jobs"][jid].update(answers=a, note=n)
-        update_db(save_answers)
-    if strong and cfg["draft_model"] != core.MODEL:
-        restore_default_model()
+            def save_answers(db, jid=job["id"], a=answers, n=note, d=docs):
+                if jid in db["jobs"]:
+                    db["jobs"][jid].update(answers=a, note=n)
+                    if d:
+                        db["jobs"][jid]["docs"] = d
+            update_db(save_answers)
+    finally:
+        if strong and cfg["draft_model"] != core.MODEL:
+            restore_default_model()
 
     stats["finished"] = stamp()
     update_db(lambda db: db["meta"].update(last_run=stats))
@@ -1106,7 +1121,8 @@ def summary():
     cfg = load_config()
     with db_lock:
         db = load_db()
-    jobs = [{k: j.get(k) for k in SUMMARY_KEYS} | {"prepared": j.get("answers") is not None}
+    jobs = [{k: j.get(k) for k in SUMMARY_KEYS} | {"prepared": j.get("answers") is not None,
+                                                    "docs": j.get("docs") is not None}
             for j in db["jobs"].values() if j.get("score") is not None]
     jobs.sort(key=lambda j: (-(j["score"] or 0), j["found"] or ""))
     meta = db["meta"]
@@ -1257,6 +1273,16 @@ def fill(page_url, fields):
         ftype = str(f.get("type", ""))
         options = [str(o)[:200] for o in (f.get("options") or [])][:100]
         a = stored.get(norm_label(label))
+        docs = (job or {}).get("docs") or {}
+        is_cover = re.search(r"cover", label + " " + str(f.get("name", "")), re.I)
+        if ftype == "file":  # which document goes in this upload
+            a = ({"kind": "file", "doc": "cover"} if docs.get("cover") else {"kind": "you"}) if is_cover \
+                else {"kind": "file", "doc": "resume"}
+            out.append({"i": i, "kind": a["kind"], "value": None, "doc": a.get("doc")})
+            continue
+        if is_cover and docs.get("cover") and ftype == "textarea":
+            out.append({"i": i, "kind": "draft", "value": docs["cover"]})
+            continue
         if overrides.get(norm_label(label)):  # Sai's answer from the review
             a = {"kind": "fact", "a": overrides[norm_label(label)]}
         elif not (a and a.get("a") and a["kind"] in ("fact", "draft")):
@@ -1278,6 +1304,269 @@ def fill(page_url, fields):
     name = str(profile.get("full_name") or "Resume").replace(" ", "_")
     return {"job": job and {"id": job["id"], "company": job["company"], "title": job["title"]},
             "approved": approved, "answers": out, "resume_name": f"{name}_Resume.pdf" if name != "Resume" else "Resume.pdf"}
+
+
+# ---------- tailored resume and cover letter ----------
+# resume.json holds Sai's resume as data (deploy/jobs-resume.example.json). For each
+# job the code picks and orders projects and skills by the job's required skills, and
+# the model only rewrites the summary (checked against the resume) and drafts the
+# cover letter. Bullets are never rewritten. The PDFs are rendered from this data each
+# time they're opened, so edits in the panel show up at once.
+
+RESUME_JSON = JOBS_DIR / "resume.json"
+MAX_PROJECTS = 4
+SUMMARY_PROMPT = """You rewrite the professional summary at the top of a resume so it fits one job.
+
+Rules:
+- Use only facts stated in the resume below. Never add a skill, tool, employer, title, number or claim the resume doesn't have.
+- Put first what the resume has that matches the job. Skip what the resume lacks; don't mention it at all.
+- Two or three sentences, 45 to 75 words, no first person, no em dashes, no quotes.
+- Reply with the summary text only."""
+COVER_PROMPT = """You write a cover letter for the candidate whose resume is below, for one job.
+
+Resume:
+{resume}
+
+Rules:
+- Every claim about the candidate must be stated in the resume. Never invent employers, titles, projects, numbers, dates or skills. Describe a project only with what its resume bullets say.
+- If the job asks for something the resume doesn't show, don't claim it; say the candidate is eager to learn it, or leave it out.
+- Start with "Dear Hiring Team," on its own line. End with "Sincerely," and then the candidate's name, {name}, on the next line.
+- Three short paragraphs between them, 170 to 250 words in all: why this role at this company, then two resume projects or experiences that match the job and what the candidate did in them, then a short close.
+- Plain text. No em dashes, no headings, no placeholders like [Company], and no mention of visas or sponsorship."""
+
+
+def load_resume():
+    data = load_json(RESUME_JSON, None)
+    return data if isinstance(data, dict) and data.get("name") else None
+
+
+def resume_as_text(r):
+    """resume.json as plain text, for the model."""
+    lines = [r["name"], "", "Summary: " + r.get("summary", ""), "", "Skills:"]
+    lines += [f"- {g['group']}: {', '.join(g['items'])}" for g in r.get("skills", [])]
+    lines += ["", "Projects:"]
+    for p in r.get("projects", []):
+        lines.append(f"{p['name']} ({p.get('subtitle', '')})")
+        lines += [f"- {b}" for b in p.get("bullets", [])]
+    lines += ["", "Experience:"]
+    for e in r.get("experience", []):
+        lines.append(f"{e['title']}, {e['org']}, {e.get('dates', '')}")
+        lines += [f"- {b}" for b in e.get("bullets", [])]
+    lines += ["", "Education:"] + [f"- {e['degree']}, {e['school']}, {e.get('dates', '')}" for e in r.get("education", [])]
+    return "\n".join(lines)
+
+
+def job_skill_words(job):
+    return [w for w in (skill_text(s) for s in (job.get("has_skills") or []) + (job.get("missing_skills") or [])) if w]
+
+
+def relevance(text, words):
+    t = " " + skill_text(text) + " "
+    return sum(1 for w in words if f" {w} " in t)
+
+
+TECH_TERMS = [  # common skills a draft might claim; checked against the resume whatever the job asks for
+    "Go", "Golang", "Rust", "Scala", "Kotlin", "Swift", "Ruby", "PHP", "C#", ".NET", "Perl", "Haskell", "Elixir",
+    "Rails", "Django", "FastAPI", "Spring", "Angular", "Vue", "Svelte", "GraphQL", "gRPC", "Kafka", "Spark", "Hadoop",
+    "Airflow", "Snowflake", "Databricks", "dbt", "Redis", "Elasticsearch", "PostgreSQL", "Postgres", "Oracle", "Cassandra",
+    "DynamoDB", "Terraform", "Ansible", "Jenkins", "Azure", "Linux", "Bash", "Kubernetes", "Docker", "PyTorch",
+    "TensorFlow", "Tableau", "Power BI", "Salesforce", "SAP", "iOS", "Android", "React Native", "Flutter", "Unity",
+    "COBOL", "Mainframe", "Solidity", "blockchain", "LLM", "RAG", "LangChain",
+]
+
+
+def unsupported(text, job, resume_norm):
+    """Skills a text mentions that the resume doesn't have: the job's required skills and
+    the common ones in TECH_TERMS."""
+    t, r = " " + skill_text(text) + " ", " " + resume_norm + " "
+    found, seen = [], set()
+    for s in list(job.get("missing_skills") or []) + TECH_TERMS:
+        n = skill_text(s)
+        if n and n not in seen and f" {n} " in t and f" {n} " not in r:
+            found.append(s)
+            seen.add(n)
+    return found
+
+
+def tailor(job, r, is_busy, model):
+    """The per-job choices for the resume and the cover letter text."""
+    words = job_skill_words(job)
+    projects = r.get("projects", [])
+    order = sorted(range(len(projects)), key=lambda i: -relevance(
+        " ".join([projects[i]["name"], projects[i].get("subtitle", "")] + projects[i].get("bullets", [])), words))
+    skills = {g["group"]: sorted(g["items"], key=lambda s: -relevance(s, words)) for g in r.get("skills", [])}
+    text, resume_norm = resume_as_text(r), skill_text(resume_as_text(r))
+    facts = (f"Job: {job['title']} at {job['company']}\nWhat the job asks for: "
+             f"{', '.join((job.get('has_skills') or []) + (job.get('missing_skills') or []))}\n"
+             f"About the job: {job.get('summary', '')}")
+    summary, warnings = r.get("summary", ""), []
+    resp = model_call([{"role": "system", "content": SUMMARY_PROMPT},
+                       {"role": "user", "content": f"{facts}\n\nResume:\n{text}"}],
+                      is_busy, model=model, options={"temperature": 0.2, "num_predict": 160})
+    new = re.sub(r"\s*—\s*", ", ", (resp.message.content or "").strip().strip('"'))
+    if 150 <= len(new) <= 700 and not unsupported(new, job, resume_norm):
+        summary = new
+    else:
+        warnings.append("Kept your usual summary: the rewrite didn't pass the checks.")
+    resp = model_call([{"role": "system", "content": COVER_PROMPT.format(resume=text, name=r["name"])},
+                       {"role": "user", "content": f"{facts}\n\nPosting:\n{job['description'][:DRAFT_DESC_CHARS]}"}],
+                      is_busy, model=model, options={"temperature": 0.3, "num_predict": 520})
+    cover = re.sub(r"\s*—\s*", ", ", (resp.message.content or "").strip())
+    if getattr(resp, "done_reason", "") == "length" and ". " in cover:
+        cover = cover[:cover.rindex(". ") + 1] + f"\n\nSincerely,\n{r['name']}"
+    extra = unsupported(cover, job, resume_norm)
+    if extra:
+        warnings.append("The cover letter mentions " + ", ".join(extra) + ", which your resume doesn't list.")
+    return {"summary": summary, "projects": order[:MAX_PROJECTS], "skills": skills, "cover": cover,
+            "warnings": warnings, "made": stamp()}
+
+
+def make_docs(job_id, is_busy):
+    """Tailor the resume and draft the cover letter for one job (panel button)."""
+    r, job = load_resume(), detail(job_id)
+    if not r or not job:
+        return False
+    cfg = load_config()
+    docs = tailor(job, r, is_busy, cfg["draft_model"])
+    if cfg["draft_model"] != core.MODEL:
+        restore_default_model()
+    return update_db(lambda db: db["jobs"][job_id].update(docs=docs) or True)
+
+
+def save_docs(job_id, summary, cover):
+    """Sai's edits to the summary and the cover letter."""
+    def change(db):
+        j = db["jobs"].get(job_id)
+        if not j or not j.get("docs"):
+            return False
+        j["docs"].update(summary=summary[:1500].strip(), cover=cover[:6000].strip(), edited=stamp())
+        return True
+    return update_db(change)
+
+
+# PDF rendering with reportlab's built-in Helvetica, which covers Windows-1252: the
+# few characters outside it are replaced so nothing prints as a box.
+PDF_REPLACE = {"→": "->", "←": "<-", "✓": "", "‑": "-", " ": " "}
+
+
+def pdf_text(s):
+    from xml.sax.saxutils import escape
+    s = "".join(PDF_REPLACE.get(c, c) for c in str(s or ""))
+    return escape(s.encode("cp1252", "replace").decode("cp1252"))
+
+
+def pdf_styles():
+    from reportlab.lib.styles import ParagraphStyle
+    base = dict(fontName="Helvetica", fontSize=9.6, leading=12.4, textColor="#1a1a1a")
+    return {
+        "name": ParagraphStyle("name", fontName="Helvetica-Bold", fontSize=19, leading=23, textColor="#111111"),
+        "contact": ParagraphStyle("contact", **{**base, "fontSize": 9, "textColor": "#444444"}),
+        "h": ParagraphStyle("h", fontName="Helvetica-Bold", fontSize=10.5, leading=13, textColor="#2b2bb8",
+                            spaceBefore=9, spaceAfter=2),
+        "body": ParagraphStyle("body", **base),
+        "bullet": ParagraphStyle("bullet", **base, leftIndent=11, bulletIndent=2, spaceBefore=1.2),
+        "item": ParagraphStyle("item", **{**base, "fontName": "Helvetica-Bold"}, spaceBefore=5),
+        "letter": ParagraphStyle("letter", **{**base, "fontSize": 10.5, "leading": 15}, spaceAfter=9),
+    }
+
+
+def contact_line(r, profile):
+    """Contact details, with the profile's email and phone first (applications use the
+    agent inbox), and the resume's links."""
+    parts = [r.get("location", ""), profile.get("email") or r.get("email", ""), profile.get("phone") or r.get("phone", "")]
+    out = [pdf_text(p) for p in parts if p]
+    for link in r.get("links", []):
+        url = str(link.get("url", ""))
+        if re.match(r"^https://[A-Za-z0-9./_~%-]+$", url):
+            out.append(f'<a href="{url}" color="#2b2bb8">{pdf_text(link.get("label", url))}</a>')
+    return " &nbsp;|&nbsp; ".join(out)
+
+
+def render_resume(r, docs, profile):
+    import io
+    from reportlab.lib.pagesizes import letter
+    from reportlab.lib.units import inch
+    from reportlab.platypus import HRFlowable, Paragraph, SimpleDocTemplate, Table, TableStyle
+    st, docs = pdf_styles(), docs or {}
+    story = [Paragraph(pdf_text(r["name"]), st["name"]), Paragraph(contact_line(r, profile), st["contact"])]
+
+    def head(text):
+        story.extend([Paragraph(pdf_text(text).upper(), st["h"]),
+                      HRFlowable(width="100%", thickness=0.6, color="#c9c9e8", spaceAfter=3)])
+
+    def row(left, right):
+        t = Table([[Paragraph(left, st["item"]), Paragraph(pdf_text(right), st["body"])]],
+                  colWidths=["78%", "22%"])
+        t.setStyle(TableStyle([("ALIGN", (1, 0), (1, 0), "RIGHT"), ("VALIGN", (0, 0), (-1, -1), "BOTTOM"),
+                               ("LEFTPADDING", (0, 0), (-1, -1), 0), ("RIGHTPADDING", (0, 0), (-1, -1), 0),
+                               ("TOPPADDING", (0, 0), (-1, -1), 0), ("BOTTOMPADDING", (0, 0), (-1, -1), 0)]))
+        story.append(t)
+
+    head("Professional summary")
+    story.append(Paragraph(pdf_text(docs.get("summary") or r.get("summary", "")), st["body"]))
+    head("Skills")
+    order = docs.get("skills") or {}
+    for g in r.get("skills", []):
+        items = order.get(g["group"]) if sorted(order.get(g["group"]) or []) == sorted(g["items"]) else g["items"]
+        story.append(Paragraph(f"<b>{pdf_text(g['group'])}:</b> {pdf_text(', '.join(items))}", st["bullet"], bulletText="•"))
+    projects = r.get("projects", [])
+    picked = [projects[i] for i in docs.get("projects") or [] if isinstance(i, int) and 0 <= i < len(projects)]
+    head("Relevant projects")
+    for p in picked or projects[:MAX_PROJECTS]:
+        sub = f" &nbsp;|&nbsp; <font name='Helvetica'>{pdf_text(p['subtitle'])}</font>" if p.get("subtitle") else ""
+        story.append(Paragraph(f"{pdf_text(p['name'])}{sub}", st["item"]))
+        story += [Paragraph(pdf_text(b), st["bullet"], bulletText="•") for b in p.get("bullets", [])]
+    head("Work experience")
+    for e in r.get("experience", []):
+        row(f"{pdf_text(e['title'])} &nbsp;|&nbsp; <font name='Helvetica'>{pdf_text(e['org'])}</font>", e.get("dates", ""))
+        story += [Paragraph(pdf_text(b), st["bullet"], bulletText="•") for b in e.get("bullets", [])]
+    head("Education")
+    for e in r.get("education", []):
+        row(f"{pdf_text(e['degree'])} &nbsp;|&nbsp; <font name='Helvetica'>{pdf_text(e['school'])}</font>", e.get("dates", ""))
+    if r.get("certifications"):
+        head("Certifications")
+        story += [Paragraph(pdf_text(c), st["bullet"], bulletText="•") for c in r["certifications"]]
+    buf = io.BytesIO()
+    SimpleDocTemplate(buf, pagesize=letter, leftMargin=0.6 * inch, rightMargin=0.6 * inch,
+                      topMargin=0.5 * inch, bottomMargin=0.5 * inch, title=f"{r['name']} Resume",
+                      author=r["name"]).build(story)
+    return buf.getvalue()
+
+
+def render_cover(r, text, job, profile):
+    import io
+    from datetime import date
+    from reportlab.lib.pagesizes import letter
+    from reportlab.lib.units import inch
+    from reportlab.platypus import HRFlowable, Paragraph, SimpleDocTemplate, Spacer
+    st = pdf_styles()
+    story = [Paragraph(pdf_text(r["name"]), st["name"]), Paragraph(contact_line(r, profile), st["contact"]),
+             HRFlowable(width="100%", thickness=0.6, color="#c9c9e8", spaceBefore=8, spaceAfter=16),
+             Paragraph(pdf_text(date.today().strftime("%B %-d, %Y")), st["letter"]),
+             Paragraph(pdf_text(f"{job['company']}, {job['title']}"), st["letter"]), Spacer(1, 4)]
+    for para in re.split(r"\n\s*\n", (text or "").strip()):
+        story.append(Paragraph(pdf_text(para).replace("\n", "<br/>"), st["letter"]))
+    buf = io.BytesIO()
+    SimpleDocTemplate(buf, pagesize=letter, leftMargin=inch, rightMargin=inch, topMargin=0.8 * inch,
+                      bottomMargin=0.8 * inch, title=f"{r['name']} Cover Letter", author=r["name"]).build(story)
+    return buf.getvalue()
+
+
+def doc_file(job_id, kind):
+    """(pdf bytes, file name) for a job's tailored resume or cover letter. Without
+    tailored documents the resume is the usual resume.pdf; there's no cover letter."""
+    profile = load_json(JOBS_DIR / "profile.json", {})
+    job, r = detail(job_id) if job_id else None, load_resume()
+    base = str(profile.get("full_name") or (r or {}).get("name") or "Resume").replace(" ", "_")
+    docs = (job or {}).get("docs")
+    if kind == "cover":
+        if not (job and docs and r and docs.get("cover")):
+            return None, None
+        return render_cover(r, docs["cover"], job, profile), f"{base}_Cover_Letter.pdf"
+    if job and docs and r:
+        return render_resume(r, docs, profile), f"{base}_Resume.pdf"
+    data = resume_pdf()
+    return (data, f"{base}_Resume.pdf") if data else (None, None)
 
 
 # ---------- review and apply ----------
@@ -1376,9 +1665,11 @@ def prepare_now(job_id, is_busy):
     resume = (JOBS_DIR / "resume.txt").read_text().strip()
     answers, note = prepare(job, load_json(JOBS_DIR / "profile.json", {}), resume, is_busy,
                             cfg["draft_model"])
+    r = load_resume() if cfg["tailor_docs"] and auto_apply_ok(job) else None
+    docs = tailor(job, r, is_busy, cfg["draft_model"]) if r else None
     if cfg["draft_model"] != core.MODEL:
         restore_default_model()
-    return update_db(lambda db: db["jobs"][job_id].update(answers=answers, note=note) or True)
+    return update_db(lambda db: db["jobs"][job_id].update(answers=answers, note=note, **({"docs": docs} if docs else {})) or True)
 
 
 # ---------- inbox ----------
