@@ -590,7 +590,7 @@ def stop(request: Request):
     return {"ok": True}
 
 
-JOB_STATUSES = ("new", "applied", "interview", "rejected", "skipped")
+JOB_STATUSES = ("new", "approved", "applied", "interview", "rejected", "skipped")
 
 
 class JobIn(BaseModel):
@@ -640,6 +640,40 @@ def jobs_prepare(body: JobIn, request: Request):
     if not jobs.detail(body.id):
         raise HTTPException(404, "No such job")
     threading.Thread(target=jobs.prepare_now, args=(body.id, panel_busy), daemon=True).start()
+    return {"ok": True}
+
+
+class ApproveIn(BaseModel):
+    id: str
+    answers: list[dict] = []
+    agreed: list[str] = []
+
+
+@app.post("/api/jobs/approve")
+def jobs_approve(body: ApproveIn, request: Request):
+    """Sai approves one application: his edited answers and the form's consents. The
+    autofill script submits approved applications in his browser."""
+    check_user(request)
+    try:
+        missing = jobs.approve(body.id, body.answers, body.agreed[:100])
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    if missing:
+        raise HTTPException(400, "Answer these first: " + "; ".join(missing))
+    return {"ok": True}
+
+
+@app.get("/api/jobs/next")
+def jobs_next(request: Request):
+    check_user(request)
+    return jobs.next_approved()
+
+
+@app.post("/api/jobs/defer")
+def jobs_defer(body: JobIn, request: Request):
+    check_user(request)
+    if not jobs.defer(body.id):
+        raise HTTPException(404, "No such job")
     return {"ok": True}
 
 
@@ -1035,6 +1069,10 @@ input{font:inherit;font-size:16px;color:var(--fg);background:var(--card);border:
 .flag.kind-rejection{border-color:var(--deny);color:var(--deny)}
 .code{font:600 22px ui-monospace,Menlo,Consolas,monospace;letter-spacing:2px;margin:6px 0}
 .setup input{margin-top:8px}
+.rv{margin:0 0 12px}
+.rv textarea,.rv select,.rv input{font:inherit;font-size:15px;color:var(--fg);background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:8px;width:100%;margin-top:4px}
+.rv textarea{min-height:60px;resize:vertical}
+.rv.need textarea,.rv.need input,.rv.need select{border-color:var(--deny)}
 .applylink{display:inline-block;background:var(--accent);color:#fff;text-decoration:none;border-radius:8px;padding:9px 14px;margin-bottom:10px}
 </style></head><body>
 <header>
@@ -1067,8 +1105,9 @@ input{font:inherit;font-size:16px;color:var(--fg);background:var(--card);border:
 </div>
 <div id="jobs" class="view">
   <div class="jbar">
-    <select id="jfilter"><option value="new">New</option><option value="applied">Applied</option><option value="interview">Interviewing</option><option value="rejected">Rejected</option><option value="skipped">Skipped</option><option value="all">All</option><option value="emails">Emails</option></select>
+    <select id="jfilter"><option value="review">Review</option><option value="approved">Approved</option><option value="new">New</option><option value="applied">Applied</option><option value="interview">Interviewing</option><option value="rejected">Rejected</option><option value="skipped">Skipped</option><option value="all">All</option><option value="emails">Emails</option></select>
     <button class="ghost" id="jrun">Run now</button>
+    <a class="approve" id="japply" target="_blank" rel="noopener noreferrer" style="display:none;text-decoration:none;border-radius:8px;padding:6px 10px;font-size:13px"></a>
     <a class="ghost" id="jsetup" href="jobs-fill.user.js">Autofill script</a>
   </div>
   <div id="jmeta"></div>
@@ -1545,14 +1584,20 @@ async function loadJobs(){
   $("jmeta").textContent = jobsMeta(s);
   $("jrun").disabled = s.progress.running || !s.configured;
   const f = $("jfilter").value;
-  const list = s.jobs.filter(j => f === "all" || j.status === f);
+  const inReview = new Set(s.review || []);
+  const list = f === "review" ? s.jobs.filter(j => inReview.has(j.id))
+    : s.jobs.filter(j => f === "all" || j.status === f);
+  updateApply(s.approved || 0);
   const sig = f + JSON.stringify(list);
   if (sig === jobsSig) return;
   jobsSig = sig;
   const box = $("jlist");
   box.replaceChildren();
   if (!s.configured) { box.append(el("div", "thought", "Job search isn't set up. Put config.json, profile.json and resume.txt in the jobs folder on the server.")); return; }
-  if (!list.length) box.append(el("div", "thought", "Nothing here yet."));
+  if (f === "review") box.append(el("div", "thought", list.length
+    ? list.length + " applications ready. Open one, check the answers, fill in what's missing, tick the statements you agree to and approve. Approved ones are submitted from Apply to approved."
+    : "Nothing to review. New applications are prepared overnight."));
+  else if (!list.length) box.append(el("div", "thought", "Nothing here yet."));
   for (const j of list) box.append(jobCard(j, s));
 }
 function jobCard(j, s){
@@ -1594,7 +1639,8 @@ async function toggleJob(id, body, reopen){
     body.append(el("div", "q", "Emails"));
     for (const m of j.emails) body.append(mailCard(m, false));
   }
-  if (j.answers) {
+  if (j.answers && j.status === "new" && j.auto_apply) reviewForm(j, body);
+  else if (j.answers) {
     for (const a of j.answers) {
       const row = el("div", "ans");
       row.append(el("div", "q", (a.required ? "* " : "") + a.q), el("div", "tool", KIND[a.kind] || a.kind), pre(a.a || ""));
@@ -1625,6 +1671,75 @@ async function toggleJob(id, body, reopen){
   }
   body.append(btns);
 }
+let applySig = "";
+async function updateApply(n){
+  const a = $("japply");
+  if (!n) { a.style.display = "none"; applySig = ""; return; }
+  if (applySig === String(n) && a.href) return;
+  try {
+    const r = await (await fetch("api/jobs/next")).json();
+    if (!r.job || !r.job.apply_url.startsWith("https://")) { a.style.display = "none"; return; }
+    a.href = r.job.apply_url + "#agent-auto";
+    a.textContent = "Apply to approved (" + r.left + ")";
+    a.style.display = "";
+    applySig = String(n);
+  } catch (e) {}
+}
+function reviewForm(j, body){
+  const rows = [], consents = [];
+  for (const a of j.answers) {
+    const row = el("div", "rv");
+    row.append(el("div", "q", (a.required ? "* " : "") + a.q));
+    if (a.kind === "file") { row.append(el("div", "tool", "Your resume PDF is attached.")); body.append(row); continue; }
+    if (a.kind === "legal") {
+      const lab = el("label", "tool");
+      const box = el("input"); box.type = "checkbox"; box.style.cssText = "width:auto;margin:0 6px 0 0;vertical-align:middle";
+      lab.append(box, document.createTextNode("I agree" + (a.required ? " (required to apply)" : " (optional, left blank if not ticked)")));
+      row.append(lab);
+      consents.push({q: a.q, box});
+      body.append(row);
+      continue;
+    }
+    if (a.kind === "eeo") { row.append(el("div", "tool", "Voluntary. Left blank; set it in the Profile tab to share it.")); body.append(row); continue; }
+    let input;
+    const opts = a.options || [];
+    if (opts.length && opts.length <= 30) {
+      input = el("select");
+      for (const o of [""].concat(opts)) { const op = el("option", null, o || "Choose"); op.value = o; input.append(op); }
+      if (a.kind !== "you" && a.a && !opts.includes(a.a)) { const op = el("option", null, a.a); op.value = a.a; input.append(op); }
+    } else {
+      input = el(a.kind === "draft" || (a.a || "").length > 60 ? "textarea" : "input");
+    }
+    const orig = a.kind === "you" ? "" : (a.a || "");
+    input.value = orig;
+    if (a.kind === "you" && input.tagName !== "SELECT") input.placeholder = a.a || "Your answer";
+    row.append(el("div", "tool", KIND[a.kind] || a.kind), input);
+    const need = a.required && a.kind === "you";
+    if (need) row.classList.add("need");
+    input.addEventListener("input", () => row.classList.toggle("need", need && !input.value.trim()));
+    rows.push({q: a.q, input, orig});
+    body.append(row);
+  }
+  if (j.note) body.append(el("div", "thought", j.note));
+  const btns = el("div", "btns");
+  const ok = el("button", "approve", "Approve");
+  ok.onclick = async () => {
+    const answers = rows.filter(r => r.input.value.trim() && r.input.value.trim() !== r.orig).map(r => ({q: r.q, a: r.input.value.trim()}));
+    const agreed = consents.filter(c => c.box.checked).map(c => c.q);
+    ok.disabled = true;
+    const r = await fetch("api/jobs/approve", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({id: j.id, answers, agreed})});
+    ok.disabled = false;
+    if (!r.ok) { const t = await r.json().catch(() => ({})); alert(t.detail || ("Error " + r.status)); return; }
+    openJob = null; jobsSig = ""; applySig = ""; loadJobs();
+  };
+  if (consents.length > 1) {
+    const all = el("button", "ghost", "Agree to all " + consents.length);
+    all.onclick = () => { for (const c of consents) c.box.checked = true; };
+    btns.append(all);
+  }
+  btns.append(ok);
+  body.append(btns);
+}
 $("jfilter").onchange = () => { openJob = null; jobsSig = ""; loadJobs(); };
 $("jrun").onclick = () => post("api/jobs/run").then(() => setTimeout(loadJobs, 500));
 if ("serviceWorker" in navigator) navigator.serviceWorker.addEventListener("message", e => { if (e.data && e.data.view) showView(e.data.view); });
@@ -1641,13 +1756,17 @@ setupAlerts();
 """
 
 # Installed in Sai's browser (Userscripts on iPhone Safari, Tampermonkey or Userscripts on
-# the Mac). It fills the form it's on and never submits it: the CAPTCHA, the consents
-# and the Submit button stay with Sai. Page text is only ever set with textContent.
+# the Mac). On any form it fills what it can and leaves the rest to Sai. Applications Sai
+# approved in the panel it also submits, but only when opened from "Apply to approved"
+# (#agent-auto): it ticks the consents he agreed to, checks every required field is
+# filled, clicks Submit after a countdown he can stop, waits for the confirmation and
+# opens the next one. CAPTCHA challenges stay with Sai. Page text is only ever set with
+# textContent.
 FILL_SCRIPT = r"""// ==UserScript==
 // @name         Agent application autofill
 // @namespace    local-agent
-// @version      2
-// @description  Fills job application forms with answers from the agent panel. You review and submit.
+// @version      3
+// @description  Fills job application forms from the agent panel, and submits the ones you approved there.
 // @match        https://job-boards.greenhouse.io/*
 // @match        https://boards.greenhouse.io/*
 // @match        https://jobs.lever.co/*
@@ -1664,6 +1783,16 @@ FILL_SCRIPT = r"""// ==UserScript==
   const KIND = {legal: "Read and answer yourself", eeo: "Voluntary, your choice", you: "Answer yourself",
                 file: "Attach the file yourself", draft: "No draft for this one, answer yourself"};
   const COLORS = {filled: "#2f9e62", review: "#2f6fd6", you: "#e08a1e"};
+  const AGREE_RE = /^(yes|i agree|agree|i acknowledge|acknowledge|i confirm|confirm|i have read|i accept|accept|i understand|i certify|i consent|consent)/i;
+  const SUCCESS_RE = /thank(s| you) for (applying|your application|submitting)|application (has been |was )?(submitted|received)|we('ve| have) received your application|successfully (submitted|applied)/i;
+  const AUTO_KEY = "agent-auto", SENT_KEY = "agent-submitted";
+  const store = {  // this tab only; the next job's link carries #agent-auto across sites
+    get: k => { try { return sessionStorage.getItem(k); } catch (e) { return null; } },
+    set: (k, v) => { try { sessionStorage.setItem(k, v); } catch (e) {} },
+    del: k => { try { sessionStorage.removeItem(k); } catch (e) {} },
+  };
+  if (location.hash.includes("agent-auto")) store.set(AUTO_KEY, "1");
+  let stopped = false;
   const gmx = (typeof GM !== "undefined" && GM.xmlHttpRequest) ? GM.xmlHttpRequest.bind(GM)
             : (typeof GM_xmlhttpRequest !== "undefined" ? GM_xmlhttpRequest : null);
   const sleep = ms => new Promise(r => setTimeout(r, ms));
@@ -1718,7 +1847,15 @@ FILL_SCRIPT = r"""// ==UserScript==
     const fields = [], els = [], radios = new Set();
     for (const el of document.querySelectorAll("input, textarea, select")) {
       const type = (el.type || "").toLowerCase();
-      if (el.disabled || ["hidden", "submit", "button", "image", "reset", "password", "search", "checkbox"].includes(type)) continue;
+      if (el.disabled || ["hidden", "submit", "button", "image", "reset", "password", "search"].includes(type)) continue;
+      if (type === "checkbox") {
+        // single boxes only (consents, opt-ins); groups of choices are left to Sai
+        if (el.name && [...document.querySelectorAll("input[type=checkbox]")].filter(c => c.name === el.name).length > 1) continue;
+        const own = labelFor(el), q = questionLabel(el);
+        fields.push({label: own.length < 30 && q && q !== own ? q + " " + own : own, type: "checkbox", options: []});
+        els.push(el);
+        continue;
+      }
       if (type === "file") { fields.push({label: fileLabel(el), type: "file", options: []}); els.push(el); continue; }
       if (el.getAttribute("aria-hidden") === "true" || el.tabIndex < 0) continue;  // validation helpers
       if (type === "radio") {
@@ -1842,7 +1979,17 @@ FILL_SCRIPT = r"""// ==UserScript==
     return false;
   }
 
-  async function put(el, f, v) {
+  async function put(el, f, v, kind) {
+    if (kind === "consent") {  // only sent for applications Sai approved
+      if (f.type === "checkbox") { if (!el.checked) el.click(); return true; }
+      const i = f.options.findIndex(o => AGREE_RE.test(clean(o)));
+      if (i < 0) return false;
+      if (f.type === "radio") { el[i].click(); return true; }
+      if (f.type === "select") { setValue(el, el.options[i].value); return true; }
+      if (f.type === "combobox") return fillCombo(el, f.options[i], false);
+      return false;
+    }
+    if (f.type === "checkbox") { if (/^yes$/i.test(v) && !el.checked) el.click(); return true; }
     if (f.type === "radio") { const i = pick(f.options, v); if (i < 0) return false; el[i].click(); return true; }
     if (f.type === "select") { const i = pick(f.options, v); if (i < 0) return false; setValue(el, el.options[i].value); return true; }
     if (f.type === "combobox") return fillCombo(el, v, /location|city/i.test(f.label));
@@ -1932,7 +2079,7 @@ FILL_SCRIPT = r"""// ==UserScript==
       if (a.kind === "file" && f.type === "file") continue;
       let state = "you";
       if (a.value && f.type !== "file") {
-        if (await put(el, f, a.value)) state = a.kind === "draft" ? "review" : "filled";
+        if (await put(el, f, a.value, a.kind)) state = a.kind === "draft" ? "review" : "filled";
         else todo.push([f.label, "Couldn't choose an option for: " + a.value]);
       } else if (a.value) {
         todo.push([f.label, "Upload this as a file or paste it: ", a.value]);
@@ -1954,6 +2101,7 @@ FILL_SCRIPT = r"""// ==UserScript==
       }
       out.push(row);
     }
+    lastRes = res;
     if (res.job) {
       const done = node("button", "Mark applied in the panel", BTN + "background:#2f6fd6;color:#fff;margin-top:10px;width:100%");
       done.onclick = () => api("POST", "/api/jobs/status", {id: res.job.id, status: "applied"})
@@ -1961,17 +2109,143 @@ FILL_SCRIPT = r"""// ==UserScript==
       out.push(done);
     }
     body.replaceChildren(...out);
+    return res;
   }
 
-  // Application forms often render after load; wait for one before showing the button.
-  let tries = 0;
-  const timer = setInterval(() => {
-    if (++tries > 40) return clearInterval(timer);
-    if (document.querySelector("input[type=email], input[name*=email i], input[type=file]")) {
-      clearInterval(timer);
-      ui();
+  // ---------- submitting approved applications ----------
+
+  let lastRes = null;
+  const visible = e => !!(e && e.offsetParent !== null && e.getClientRects().length);
+
+  // Required fields still empty, by their question text
+  function missingRequired() {
+    const out = [], seen = new Set();
+    for (const el of document.querySelectorAll("input, textarea, select")) {
+      const req = el.required || el.getAttribute("aria-required") === "true";
+      if (!req || el.disabled || el.type === "hidden") continue;
+      let empty;
+      if (el.type === "radio") {
+        if (seen.has(el.name)) continue;
+        seen.add(el.name);
+        empty = ![...document.querySelectorAll("input[type=radio]")].some(r => r.name === el.name && r.checked);
+      } else if (el.type === "checkbox") empty = !el.checked;
+      else if (el.type === "file") empty = !(el.files && el.files.length) && !visible(el.closest("[class*=upload], [class*=Upload]")?.querySelector("[class*=filename], [class*=file-name], [class*=FileName]"));
+      else if (el.getAttribute("role") === "combobox") {
+        const box = el.closest("[class*=container], [class*=Container]");
+        empty = !el.value && !(box && box.querySelector("[class*=singleValue], [class*=multiValue], [class*=single-value]"));
+      } else {
+        if (!visible(el)) continue;
+        empty = !String(el.value || "").trim();
+      }
+      if (empty) out.push(labelFor(el) || questionLabel(el) || el.name || "A required field");
     }
-  }, 500);
-  window.__agentFill = {collect, put, mark, attachResume, run};  // for testing from the console
+    return out;
+  }
+
+  function submitButton() {
+    return [...document.querySelectorAll("button, input[type=submit]")].find(b => visible(b) && !b.disabled
+      && /^(submit( your)?( application)?|apply|send application)$/i.test(clean(b.innerText || b.value)));
+  }
+
+  const challengeOpen = () => [...document.querySelectorAll("iframe")].some(f =>
+    /recaptcha.*bframe|hcaptcha.*challenge|challenge/i.test(f.src + " " + (f.title || "")) && visible(f) && f.offsetHeight > 100);
+  const succeeded = () => SUCCESS_RE.test(document.body.innerText) || /\/(thanks|confirmation|thank_you|success)\b/i.test(location.pathname);
+
+  function row(...nodes) { const d = node("div", undefined, "margin-top:8px"); d.append(...nodes); return d; }
+  function stopButton(label) {
+    const b = node("button", label || "Stop applying", BTN + "background:#a3392b;color:#fff;margin-top:8px;width:100%");
+    b.onclick = () => { stopped = true; store.del(AUTO_KEY); store.del(SENT_KEY); say("Stopped. Approved applications stay approved; open Apply to approved in the panel to go on."); };
+    return b;
+  }
+
+  // After Submit: wait for the confirmation (this page or the next one), then move on.
+  async function watch(job) {
+    for (let t = 0; t < 240 && !stopped; t++) {  // 2 minutes, then a CAPTCHA may still be open
+      if (succeeded()) return finished(job);
+      if (challengeOpen()) body.replaceChildren(row(node("div", "Solve the CAPTCHA for " + job.company + ". It goes on by itself after that.")), stopButton());
+      await sleep(500);
+    }
+    if (stopped) return;
+    const again = node("button", "It went through", BTN + "background:#2f6fd6;color:#fff;margin-top:8px;width:100%");
+    again.onclick = () => finished(job);
+    body.replaceChildren(row(node("div", "No confirmation from " + job.company + " yet. Fix what the form points out and tap its Submit button, or confirm it went through.")), again, laterButton(job), stopButton());
+    for (let t = 0; t < 1200 && !stopped; t++) {  // keep watching while Sai fixes things
+      if (succeeded()) return finished(job);
+      await sleep(500);
+    }
+  }
+
+  function laterButton(job) {
+    const b = node("button", "Skip for now, next one", BTN + "background:#33322e;color:#ebeae4;margin-top:8px;width:100%");
+    b.onclick = async () => { stopped = true; store.del(SENT_KEY); await api("POST", "/api/jobs/defer", {id: job.id}).catch(() => {}); goNext(); };
+    return b;
+  }
+
+  async function finished(job) {
+    store.del(SENT_KEY);
+    try { await api("POST", "/api/jobs/status", {id: job.id, status: "applied"}); } catch (e) {}
+    say("Submitted: " + job.company + ", " + job.title + ".");
+    if (store.get(AUTO_KEY)) { await sleep(2500); if (!stopped) goNext(); }
+  }
+
+  async function goNext() {
+    let n;
+    try { n = await api("GET", "/api/jobs/next"); } catch (e) { return say(e.message); }
+    if (!n.job) { store.del(AUTO_KEY); return say("All approved applications are done."); }
+    if (!/^https:\/\//.test(n.job.apply_url)) return say("The next job has no application link.");
+    say("Next: " + n.job.company + ", " + n.job.title + " (" + n.left + " left).");
+    location.href = n.job.apply_url + "#agent-auto";
+  }
+
+  async function autoApply() {
+    stopped = false;
+    const res = await run();
+    if (!res || !res.job) return;
+    if (!res.approved) return body.append(row(node("div", "Not approved in the panel, so it won't be submitted. Review it in the Jobs tab.", "color:#e08a1e")));
+    await sleep(1200);  // let the form settle after the last choices
+    const missing = missingRequired();
+    if (missing.length) {
+      body.replaceChildren(row(node("div", "Fill these, then tap the form's Submit button:", "font-weight:600")),
+        ...missing.slice(0, 8).map(q => row(node("div", q, "color:#e08a1e"))), laterButton(res.job), stopButton());
+      store.set(SENT_KEY, JSON.stringify({id: res.job.id, company: res.job.company, title: res.job.title, at: Date.now()}));
+      return watch(res.job);
+    }
+    const btn = submitButton();
+    if (!btn) {
+      body.replaceChildren(row(node("div", "Couldn't find the Submit button. Tap it yourself.")), laterButton(res.job), stopButton());
+      store.set(SENT_KEY, JSON.stringify({id: res.job.id, company: res.job.company, title: res.job.title, at: Date.now()}));
+      return watch(res.job);
+    }
+    for (let s = 3; s > 0 && !stopped; s--) {
+      body.replaceChildren(row(node("div", "Submitting " + res.job.company + ": " + res.job.title + " in " + s + "...", "font-weight:600")), stopButton("Stop"));
+      await sleep(1000);
+    }
+    if (stopped) return;
+    store.set(SENT_KEY, JSON.stringify({id: res.job.id, company: res.job.company, title: res.job.title, at: Date.now()}));
+    btn.click();
+    body.replaceChildren(row(node("div", "Submitted, waiting for " + res.job.company + " to confirm...")), stopButton());
+    watch(res.job);
+  }
+
+  // A page loaded after Submit (the confirmation) picks up the job it was waiting for.
+  let sent = null;
+  try { sent = JSON.parse(store.get(SENT_KEY) || "null"); } catch (e) {}
+  if (sent && Date.now() - sent.at < 30 * 60 * 1000 && !document.querySelector("input[type=file]")) {
+    ui(); minimize(false);
+    say("Checking whether " + sent.company + " confirmed...");
+    watch(sent);
+  } else {
+    // Application forms often render after load; wait for one before showing the button.
+    let tries = 0;
+    const timer = setInterval(() => {
+      if (++tries > 40) return clearInterval(timer);
+      if (document.querySelector("input[type=email], input[name*=email i], input[type=file]")) {
+        clearInterval(timer);
+        ui();
+        if (store.get(AUTO_KEY)) { minimize(false); autoApply(); }
+      }
+    }, 500);
+  }
+  window.__agentFill = {collect, put, mark, attachResume, run, missingRequired, submitButton};  // for testing from the console
 })();
 """

@@ -2,7 +2,8 @@
 """Job search: find openings, score them against Sai's resume, prepare applications.
 
 server.py runs this on a schedule inside the panel process. It never submits an
-application. It prepares the answers and Sai applies through the posting link.
+application itself. It prepares the answers, Sai reviews and approves them in the panel,
+and the autofill script in his browser submits the approved ones.
 
 Network access is limited to URLs this module builds itself: the public job board
 APIs of Greenhouse, Lever, Ashby, Workday (<tenant>.wdN.myworkdayjobs.com) and
@@ -73,6 +74,7 @@ DEFAULTS = {
     "max_scored_per_run": 200,
     "draft_model": "qwen3:8b",  # the 4B invented project details in drafts; the 8B stuck to the resume
     "max_drafts_per_run": 15,
+    "queue_size": 50,          # applications in the morning review list
     "good_score": 60,
     "strong_score": 72,
 }
@@ -1004,10 +1006,11 @@ def _run(is_busy):
     # 3. Prepare answers for the best new matches.
     with db_lock:
         db = load_db()
+        # boards the autofill can submit on come first, so the review list fills up
         strong = sorted((j for j in db["jobs"].values()
                          if j["status"] == "new" and j.get("answers") is None
-                         and (j.get("score") or 0) >= cfg["strong_score"]),
-                        key=lambda j: -j["score"])[:cfg["max_drafts_per_run"]]
+                         and (j.get("score") or 0) >= cfg["good_score"]),
+                        key=lambda j: (not auto_apply_ok(j), -j["score"]))[:cfg["max_drafts_per_run"]]
     for i, job in enumerate(strong, 1):
         set_progress(f"preparing {job['company']}: {job['title']}", i, len(strong))
         answers, note = prepare(job, profile, resume, is_busy, cfg["draft_model"])
@@ -1055,6 +1058,7 @@ def digest(notify):
                  and (j.get("score") or 0) >= cfg["good_score"]]
         last = db["meta"].get("last_run") or {}
     fresh.sort(key=lambda j: -j["score"])
+    waiting = len(review_queue(db, cfg))
     strong = sum(1 for j in fresh if j["score"] >= cfg["strong_score"])
     if fresh:
         def line(j):
@@ -1065,6 +1069,8 @@ def digest(notify):
         body = f"{len(fresh)} new matches, {strong} strong. {top}"
     else:
         body = f"No new matches. Scored {last.get('scored', 0)} openings from {last.get('boards', 0)} companies."
+    if waiting:
+        body = f"{waiting} applications ready for your review. " + body
     notify("Jobs", body, tag="jobs")
     update_db(lambda db: db["meta"].update(last_digest_at=stamp(),
                                            last_digest_date=today(cfg).date().isoformat()))
@@ -1111,6 +1117,8 @@ def summary():
         "unscored": sum(1 for j in db["jobs"].values()
                         if j.get("score_version") != SCORE_VERSION and j["status"] == "new"),
         "jobs": jobs,
+        "review": [j["id"] for j in review_queue(db, cfg)],
+        "approved": sum(1 for j in db["jobs"].values() if j["status"] == "approved"),
     }
 
 
@@ -1135,7 +1143,8 @@ def detail(job_id):
         return None
     if job.get("answers") is not None:
         job["answers"] = refresh_answers(job, load_json(JOBS_DIR / "profile.json", {}))
-    return {**job, "apply_url": apply_url(job), "emails": job_emails(job_id)}
+    return {**job, "apply_url": apply_url(job), "emails": job_emails(job_id),
+            "auto_apply": auto_apply_ok(job)}
 
 
 def profile_form():
@@ -1230,6 +1239,9 @@ def fill(page_url, fields):
     Returns a value only for facts, drafts and the resume; everything else is Sai's."""
     profile = load_json(JOBS_DIR / "profile.json", {})
     job = detail(job_id_for_url(page_url) or "")
+    approved = bool(job) and job["status"] == "approved"
+    agreed = {norm_label(q) for q in (job or {}).get("consents") or []} if approved else set()
+    overrides = {norm_label(q): a for q, a in ((job or {}).get("overrides") or {}).items()}
     stored = {norm_label(a["q"]): a for a in (job or {}).get("answers") or []}
     spare_drafts = [a for a in stored.values() if a["kind"] == "draft" and a.get("a")]
     out = []
@@ -1238,18 +1250,99 @@ def fill(page_url, fields):
         ftype = str(f.get("type", ""))
         options = [str(o)[:200] for o in (f.get("options") or [])][:100]
         a = stored.get(norm_label(label))
-        if not (a and a.get("a") and a["kind"] in ("fact", "draft")):
+        if overrides.get(norm_label(label)):  # Sai's answer from the review
+            a = {"kind": "fact", "a": overrides[norm_label(label)]}
+        elif not (a and a.get("a") and a["kind"] in ("fact", "draft")):
             a = answer_for(label, [{"type": "input_file" if ftype == "file" else ftype,
                                     "values": [{"label": o} for o in options]}], profile,
                            (job or {}).get("company", ""))
             if a["kind"] == "draft":  # reuse a prepared draft only for a question like it
                 fits = spare_drafts and re.search(r"why|interest|cover letter|motivat", label, re.I)
                 a = spare_drafts.pop(0) if fits else {"kind": "you"}
-        value = a.get("a") if a["kind"] in ("fact", "draft") else None
+        if ftype == "checkbox" and a["kind"] not in ("legal", "fact"):
+            a = {"kind": "you"}
+        if a["kind"] == "legal" and norm_label(label) in agreed:  # Sai ticked it when approving
+            if ftype in ("text", "textarea") and re.search(r"signature|full name|type your name", label, re.I):
+                a = {"kind": "fact", "a": str(profile.get("full_name") or "")}
+            else:
+                a = {"kind": "consent", "a": "agree"}
+        value = a.get("a") if a["kind"] in ("fact", "draft", "consent") else None
         out.append({"i": i, "kind": a["kind"], "value": value})
     name = str(profile.get("full_name") or "Resume").replace(" ", "_")
     return {"job": job and {"id": job["id"], "company": job["company"], "title": job["title"]},
-            "answers": out, "resume_name": f"{name}_Resume.pdf" if name != "Resume" else "Resume.pdf"}
+            "approved": approved, "answers": out, "resume_name": f"{name}_Resume.pdf" if name != "Resume" else "Resume.pdf"}
+
+
+# ---------- review and apply ----------
+# Each morning Sai reviews up to queue_size prepared applications. Approving one saves
+# his edits and his agreement to its consents; the autofill script then submits it in
+# his browser, where any CAPTCHA stays his to solve.
+
+AUTO_ATS = ("greenhouse", "lever", "ashby")  # forms the autofill script can fill and submit
+
+
+def auto_apply_ok(job):
+    return job["id"].split(":", 1)[0] in AUTO_ATS
+
+
+def needs_answer(a):
+    """A required question the profile, the drafts and the consents don't cover."""
+    return (a.get("required") and a["kind"] == "you" and not FOLLOWUP_RE.search(a["q"]))
+
+
+def review_queue(db, cfg):
+    jobs = [j for j in db["jobs"].values()
+            if j["status"] == "new" and j.get("answers") is not None and auto_apply_ok(j)
+            and (j.get("score") or 0) >= cfg["good_score"]]
+    jobs.sort(key=lambda j: -(j.get("score") or 0))
+    return jobs[:cfg["queue_size"]]
+
+
+def approve(job_id, answers, agreed):
+    """Approve one application with Sai's edited answers and the consents he ticked.
+    Returns the required questions still without an answer (a required consent he
+    didn't tick counts); nothing is saved while any are left."""
+    job = detail(job_id)
+    if not job or not auto_apply_ok(job) or job.get("answers") is None:
+        raise ValueError("This job can't be approved for automatic applying.")
+    overrides = {}
+    for item in answers[:200]:
+        q, a = str(item.get("q", ""))[:500].strip(), str(item.get("a", ""))[:PROFILE_MAX_CHARS].strip()
+        if q and a:
+            overrides[q] = a
+    agreed = {str(q) for q in agreed}
+    consents = [a["q"] for a in job["answers"] if a["kind"] == "legal" and a["q"] in agreed]
+    missing = [a["q"] for a in job["answers"]
+               if (needs_answer(a) and not overrides.get(a["q"]))
+               or (a["kind"] == "legal" and a.get("required") and a["q"] not in agreed)]
+    if missing:
+        return missing
+
+    def change(db):
+        j = db["jobs"].get(job_id)
+        if j:
+            j.update(status="approved", status_at=stamp(), approved_at=stamp(),
+                     overrides=overrides, consents=consents)
+            j.pop("deferred_at", None)
+    update_db(change)
+    return []
+
+
+def next_approved():
+    """The approved application to submit next; ones Sai put off go last."""
+    with db_lock:
+        jobs = [j for j in load_db()["jobs"].values() if j["status"] == "approved"]
+    jobs.sort(key=lambda j: (j.get("deferred_at") or "", j.get("approved_at") or ""))
+    if not jobs:
+        return {"job": None, "left": 0}
+    j = jobs[0]
+    return {"job": {"id": j["id"], "company": j["company"], "title": j["title"], "apply_url": apply_url(j)},
+            "left": len(jobs)}
+
+
+def defer(job_id):
+    return update_db(lambda db: bool(db["jobs"].get(job_id)) and
+                     (db["jobs"][job_id].update(deferred_at=stamp()) or True))
 
 
 def resume_pdf():
