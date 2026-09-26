@@ -683,7 +683,7 @@ FACTS = [  # (label pattern, profile key); first match wins, so specific pattern
     (r"pronoun", "pronouns"),
     (r"without (company |employer )?sponsor", "authorized_without_sponsorship"),
     (r"(what|which|type of) (sponsorship|support)|sponsorship would you require|list the type", "sponsorship_type"),
-    (r"sponsor|sponorship|immigration (support|case)|visa", "needs_sponsorship"),
+    (r"sponsor|sponorship|immigration (support|case)|\bvisa\b(?!.{0,15}mastercard)(?! card)", "needs_sponsorship"),
     (r"authori[sz]ed to work|legally (authorized|eligible|able|work authorized) to work|work authori[sz]ation|eligible to work", "work_authorized"),
     (r"u\.?s\.? person|export control", "us_person"),
     (r"cuba|iran|north korea|syria|crimea", "sanctioned_country"),
@@ -734,6 +734,7 @@ LEGAL_RE = re.compile(r"agree|acknowledg|consent|arbitrat|attest|\bi (hereby )?c
                       r"confirm that|read the|understand that", re.I)
 PAST_RE = re.compile(r"(previously|before|ever|past).{0,40}(work|interview|appl|employ|consult|engaged)|"
                      r"(employ|work|engaged).{0,80}(in the past|before\b|previously)|current or former .{0,40}employee", re.I)
+EXPERIENCE_RE = re.compile(r"(do you (have|possess)|have you).{0,40}\b(\d+|one|two|three|four|five)\+? (\) )?years?\b", re.I)
 FOLLOWUP_RE = re.compile(r"^(\[optional[^\]]*\] )?(if (you|yes|so|other|\"|'|“|applicable)|please (specify|explain|provide additional))", re.I)
 OPEN_RE = re.compile(r"^(why|what|how|tell|describe|share|explain|briefly|please (describe|share|tell|explain))|\?\s*$", re.I)
 
@@ -796,6 +797,8 @@ def answer_for(label, fields, profile, company=""):
                 "a": "Fill in the company lists in the Profile tab, or answer this yourself."}
     if PAST_RE.search(label) and not re.search(r"government|military|state.owned", label, re.I):
         return {"kind": "you", "a": "Answer this yourself."}
+    if EXPERIENCE_RE.search(label):  # "Do you possess 2 years of experience in X?" is about skills
+        return {"kind": "you", "a": "Answer this yourself.", "options": options}
     for pat, key in FACTS:
         if re.search(pat, label, re.I):
             if key in LINK_KEYS and len(label) > 60:
@@ -1127,7 +1130,11 @@ def refresh_answers(job, profile):
     so changes in the Profile tab show up in jobs prepared before them."""
     out = []
     for a in job.get("answers") or []:
-        if a["kind"] != "draft":
+        if a["kind"] == "draft":  # a draft for a question the profile now answers gives way
+            fresh = answer_for(a["q"], [{"type": "textarea"}], profile, job["company"])
+            if fresh["kind"] == "fact":
+                a = {"q": a["q"], "required": a.get("required", False), **fresh}
+        elif a["kind"] != "draft":
             fields = [{"type": "input_file" if a["kind"] == "file" else "",
                        "values": [{"label": o} for o in a.get("options") or []]}]
             a = {"q": a["q"], "required": a.get("required", False),

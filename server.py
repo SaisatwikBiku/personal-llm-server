@@ -1765,7 +1765,7 @@ setupAlerts();
 FILL_SCRIPT = r"""// ==UserScript==
 // @name         Agent application autofill
 // @namespace    local-agent
-// @version      3
+// @version      4
 // @description  Fills job application forms from the agent panel, and submits the ones you approved there.
 // @match        https://job-boards.greenhouse.io/*
 // @match        https://boards.greenhouse.io/*
@@ -1797,7 +1797,11 @@ FILL_SCRIPT = r"""// ==UserScript==
             : (typeof GM_xmlhttpRequest !== "undefined" ? GM_xmlhttpRequest : null);
   const sleep = ms => new Promise(r => setTimeout(r, ms));
   const clean = t => (t || "").replace(/[*✱]/g, "").replace(/\s+/g, " ").trim();
+  // Forms spell some answers differently: "United States" is "US" on Stripe's form.
+  const ALIASES = {"united states": "us", "united states of america": "us", "usa": "us", "u s": "us", "u s a": "us",
+                   "united kingdom": "uk", "great britain": "uk"};
   const norm = s => (s || "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+  const alias = s => ALIASES[norm(s)] || norm(s);
 
   function api(method, path, body) {
     return new Promise((resolve, reject) => {
@@ -1887,11 +1891,14 @@ FILL_SCRIPT = r"""// ==UserScript==
   }
 
   function pick(options, value) {
-    const v = norm(value);
-    if (!v) return -1;
-    let i = options.findIndex(o => norm(o) === v);
-    if (i < 0) i = options.findIndex(o => { const n = norm(o); return n && (v.startsWith(n + " ") || n.startsWith(v + " ")); });
-    return i;
+    if (!norm(value)) return -1;
+    for (const f of [norm, alias]) {  // as written first, then "United States" as "US"
+      const v = f(value);
+      let i = options.findIndex(o => f(o) === v);
+      if (i < 0) i = options.findIndex(o => { const n = f(o); return n && (v.startsWith(n + " ") || n.startsWith(v + " ")); });
+      if (i >= 0) return i;
+    }
+    return -1;
   }
 
   // Option index for a dropdown answer. Location searches also accept the first word
@@ -1911,7 +1918,20 @@ FILL_SCRIPT = r"""// ==UserScript==
   function pageHelper() {
     if (document.documentElement.hasAttribute("data-agent-helper")) return;
     document.documentElement.setAttribute("data-agent-helper", "1");
+    const ALIASES = {"united states": "us", "united states of america": "us", "usa": "us", "u s": "us", "u s a": "us",
+                     "united kingdom": "uk", "great britain": "uk"};
     const norm = s => (s || "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+    const alias = s => ALIASES[norm(s)] || norm(s);
+    const find = (raw, value, loose) => {  // as written first, then "United States" as "US"
+      for (const f of [norm, alias]) {
+        const labels = raw.map(f), v = f(value), first = v.split(" ")[0];
+        let i = labels.findIndex(l => l === v);
+        if (i < 0) i = labels.findIndex(l => l && (v.startsWith(l + " ") || l.startsWith(v + " ")));
+        if (i < 0 && loose) i = labels.findIndex(l => first && l.startsWith(first));
+        if (i >= 0) return i;
+      }
+      return -1;
+    };
     const comp = el => {
       const fk = Object.keys(el).find(k => k.startsWith("__reactFiber"));
       for (let f = fk && el[fk], k = 0; f && k < 40; k++, f = f.return)
@@ -1923,16 +1943,25 @@ FILL_SCRIPT = r"""// ==UserScript==
       const loose = el.getAttribute("data-agent-loose") === "1";
       let inst = comp(el);
       if (!inst) return el.setAttribute("data-agent-fill-result", "none");
+      const labelOf = o => String((inst.props.getOptionLabel ? inst.props.getOptionLabel(o) : o.label) || "");
+      if (typeof inst.props.loadOptions === "function") {
+        // search-as-you-type lists (Greenhouse school, degree, discipline) load options
+        // only when opened; ask the list's own loader, with the full answer and its first part
+        for (const q of [...new Set([value, value.split(/,| - /)[0].trim()])]) {
+          try {
+            const r = await inst.props.loadOptions(q, [], {page: 1});
+            const opts = (r && r.options) || [];
+            const i = find(opts.map(labelOf), value, loose);
+            if (i >= 0) { comp(el).selectOption(opts[i]); return el.setAttribute("data-agent-fill-result", "ok"); }
+          } catch (err) {}
+        }
+      }
       if (inst.props.onInputChange) inst.props.onInputChange(value.split(",")[0], {action: "input-change", prevInputValue: ""});
-      const v = norm(value), first = v.split(" ")[0];
       for (let t = 0; t < 12; t++) {  // options can load from the network
         await new Promise(r => setTimeout(r, 250));
         inst = comp(el);
         const opts = inst.props.options || [];
-        const labels = opts.map(o => norm(String((inst.props.getOptionLabel ? inst.props.getOptionLabel(o) : o.label) || "")));
-        let i = labels.findIndex(l => l === v);
-        if (i < 0) i = labels.findIndex(l => l && (v.startsWith(l + " ") || l.startsWith(v + " ")));
-        if (i < 0 && loose) i = labels.findIndex(l => first && l.startsWith(first));
+        const i = find(opts.map(labelOf), value, loose);
         if (i >= 0) { inst.selectOption(opts[i]); return el.setAttribute("data-agent-fill-result", "ok"); }
       }
       el.setAttribute("data-agent-fill-result", "no");
@@ -2123,6 +2152,7 @@ FILL_SCRIPT = r"""// ==UserScript==
     for (const el of document.querySelectorAll("input, textarea, select")) {
       const req = el.required || el.getAttribute("aria-required") === "true";
       if (!req || el.disabled || el.type === "hidden") continue;
+      if (el.getAttribute("aria-hidden") === "true" && el.tabIndex < 0) continue;  // react-select's own validation input
       let empty;
       if (el.type === "radio") {
         if (seen.has(el.name)) continue;
@@ -2131,8 +2161,9 @@ FILL_SCRIPT = r"""// ==UserScript==
       } else if (el.type === "checkbox") empty = !el.checked;
       else if (el.type === "file") empty = !(el.files && el.files.length) && !visible(el.closest("[class*=upload], [class*=Upload]")?.querySelector("[class*=filename], [class*=file-name], [class*=FileName]"));
       else if (el.getAttribute("role") === "combobox") {
-        const box = el.closest("[class*=container], [class*=Container]");
-        empty = !el.value && !(box && box.querySelector("[class*=singleValue], [class*=multiValue], [class*=single-value]"));
+        // react-select shows the choice next to the input, inside the control
+        const box = el.closest("[class*=__control], [class*=-control], [class*=Control]");
+        empty = !(box && box.querySelector("[class*=single-value], [class*=singleValue], [class*=multi-value], [class*=multiValue]"));
       } else {
         if (!visible(el)) continue;
         empty = !String(el.value || "").trim();
