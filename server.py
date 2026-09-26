@@ -7,6 +7,7 @@ as the agent user through toolrunner.py when AGENT_USE_TOOLRUNNER=1.
 """
 import asyncio
 import base64
+import io
 import json
 import os
 import queue
@@ -15,6 +16,7 @@ import subprocess
 import threading
 import time
 import uuid
+import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -51,6 +53,9 @@ CHAT_MODELS = {"better": os.environ.get("AGENT_CHAT_MODEL", "qwen3:8b"), "faster
 CHAT_HISTORY_CHARS = 12_000  # about 3,000 tokens: the 8B rereads 17 tokens/s when its cache is lost
 CHAT_MAX_CHATS = 50
 MEMORY_MAX_CHARS = 2_000
+FILE_MAX_BYTES = 5_000_000      # per attached file
+FILE_MAX_CHARS = 1_000_000      # text kept from a file (tasks save all of it)
+CHAT_ATTACH_CHARS = 16_000      # file text put into one chat message, about 4,000 tokens
 chat_lock = threading.Lock()
 chat_active = threading.Semaphore(1)  # one reply at a time; the CPU can't do two
 
@@ -277,6 +282,58 @@ CHAT_PROMPT = """You are a helpful assistant for Sai, running privately on his o
 - You have no internet access and no tools here, and your knowledge stops at your training date. For anything current, say you can't check it.
 - For code, give complete, working snippets.""".replace("Sai", core.OWNER)
 
+def extract_text(name, data):
+    """Text from an attached file: PDF (text layer only), Word .docx, or anything that
+    decodes as text. Raises ValueError with a message for Sai when it can't."""
+    if data[:5] == b"%PDF-":
+        from pypdf import PdfReader
+        try:
+            pages = [p.extract_text() or "" for p in PdfReader(io.BytesIO(data)).pages]
+        except Exception as e:
+            raise ValueError(f"Couldn't read this PDF ({e}).")
+        text = "\n\n".join(p.strip() for p in pages if p.strip())
+        if not text:
+            raise ValueError("This PDF has no text layer; it may be a scan. Images aren't supported.")
+        return text
+    if data[:2] == b"PK":
+        try:
+            with zipfile.ZipFile(io.BytesIO(data)) as z:
+                xml = z.read("word/document.xml").decode("utf-8", "replace")
+        except (zipfile.BadZipFile, KeyError):
+            raise ValueError("Only Word .docx files are supported from zip-based formats.")
+        xml = re.sub(r"</w:p>", "\n", xml)
+        xml = re.sub(r"<w:tab/>", "\t", xml)
+        return re.sub(r"\n{3,}", "\n\n", re.sub(r"<[^>]+>", "", xml)).strip()
+    if b"\x00" in data[:8192]:
+        raise ValueError("This looks like a binary file (image, audio, archive...). Only text, PDF and .docx work.")
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError:
+        return data.decode("latin-1")
+
+
+def safe_filename(name):
+    base = os.path.basename(name.replace("\\", "/")) or "file"
+    base = re.sub(r"[^A-Za-z0-9._-]+", "_", base).strip("._") or "file"
+    return base[:80]
+
+
+def chat_attachment_text(files):
+    """The files as a block ahead of Sai's message, cut to CHAT_ATTACH_CHARS in total."""
+    blocks, left = [], CHAT_ATTACH_CHARS
+    for f in files:
+        text = f.text
+        cut = ""
+        if len(text) > left:
+            cut = f"\n[cut: the first {left:,} of {len(text):,} characters]"
+            text = text[:left]
+        blocks.append(f"Attached file: {f.name}\n<<<\n{text}{cut}\n>>>")
+        left -= len(text)
+        if left <= 0:
+            break
+    return "\n\n".join(blocks)
+
+
 REMEMBER_RE = re.compile(r"^\s*remember(?:\s+that)?\s*[:,]?\s+(.+)$", re.I | re.S)
 
 
@@ -422,8 +479,14 @@ def check_user(request: Request):
         raise HTTPException(403, "Not allowed")
 
 
+class FileIn(BaseModel):
+    name: str
+    text: str
+
+
 class TaskIn(BaseModel):
     task: str
+    files: list[FileIn] = []
 
 
 class DecisionIn(BaseModel):
@@ -453,15 +516,35 @@ def get_state(request: Request, since: int = 0):
 
 @app.post("/api/task")
 def start_task(body: TaskIn, request: Request):
+    """Start a task. Attached files are saved to uploads/ in the agent's workspace (as
+    the agent user, through the tool runner) and listed in the task text, so the model
+    can read them with its tools."""
     check_user(request)
     task = body.task.strip()
-    if not task:
+    if not task and not body.files:
         raise HTTPException(400, "Empty task")
+    if any(len(f.text) > FILE_MAX_CHARS for f in body.files):
+        raise HTTPException(400, f"A file is over {FILE_MAX_CHARS:,} characters")
     with lock:
         if state["status"] != "idle":
             raise HTTPException(409, "A task is already running")
-        state["task"] = task
+        state["task"] = task or "(files)"
         state["status"] = "thinking"
+    saved = []
+    for f in body.files:
+        path = f"uploads/{safe_filename(f.name)}"
+        result = run_tool("write_file", path, f.text)
+        if not result.startswith("Wrote"):
+            set_status("idle")
+            with lock:
+                state["task"] = None
+            raise HTTPException(500, f"Couldn't save {f.name}: {result[:200]}")
+        saved.append(f"{path} ({len(f.text):,} characters)")
+    if saved:
+        task = (task or "Look at the attached files.") + \
+            f"\n\nFiles {core.OWNER} attached, saved in the workspace: " + ", ".join(saved)
+        with lock:
+            state["task"] = task
     stop_requested.clear()
     threading.Thread(target=run_task, args=(task,), daemon=True).start()
     return {"ok": True}
@@ -576,6 +659,33 @@ class ChatIn(BaseModel):
     message: str
     chat_id: str = ""
     model: str = "better"
+    files: list[FileIn] = []
+
+
+class ExtractIn(BaseModel):
+    name: str
+    data: str  # base64
+
+
+@app.post("/api/extract")
+def extract(body: ExtractIn, request: Request):
+    """Turn an attached file into text, so the page can show its size and reading time
+    before sending. Nothing is stored."""
+    check_user(request)
+    try:
+        data = base64.b64decode(body.data, validate=True)
+    except ValueError:
+        raise HTTPException(400, "Bad file data")
+    if len(data) > FILE_MAX_BYTES:
+        raise HTTPException(400, f"Files are limited to {FILE_MAX_BYTES // 1_000_000} MB")
+    try:
+        text = extract_text(body.name, data)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    if not text.strip():
+        raise HTTPException(400, "No text found in this file")
+    return {"name": safe_filename(body.name), "text": text[:FILE_MAX_CHARS], "chars": len(text),
+            "chat_limit": CHAT_ATTACH_CHARS}
 
 
 @app.get("/api/chats")
@@ -613,16 +723,22 @@ def chat_send(body: ChatIn, request: Request):
     in the X-Chat-Id header, so the first message of a new chat can create it."""
     check_user(request)
     text = body.message.strip()
-    if not text:
+    if not text and not body.files:
         raise HTTPException(400, "Empty message")
+    if body.files and not text:
+        text = "Summarize the attached file." if len(body.files) == 1 else "Summarize the attached files."
+    content = (chat_attachment_text(body.files) + "\n\n" + text) if body.files else text
     model = CHAT_MODELS.get(body.model, CHAT_MODELS["better"])
     with chat_lock:
         chats = load_chats()
         chat_id = body.chat_id if body.chat_id in chats else uuid.uuid4().hex[:10]
         chat = chats.setdefault(chat_id, {"title": text[:60], "created": time.time(), "messages": []})
-        chat["messages"].append({"role": "user", "content": text, "time": now()})
+        msg = {"role": "user", "content": content, "time": now()}
+        if body.files:  # the page shows the message and file names, not the file text
+            msg.update(text=text, files=[{"name": f.name, "chars": len(f.text)} for f in body.files])
+        chat["messages"].append(msg)
         chat["updated"] = time.time()
-        remembered = REMEMBER_RE.match(text)
+        remembered = not body.files and REMEMBER_RE.match(text)
         if remembered:  # "remember that ..." saves the fact itself; no model call
             fact = " ".join(remembered.group(1).split())
             mem = load_memory()
@@ -776,6 +892,14 @@ nav button.on{color:var(--fg);border-bottom-color:var(--accent);font-weight:600}
 .msg pre{margin:6px 0}
 .msg code{font:13px ui-monospace,Menlo,Consolas,monospace;background:var(--code);padding:1px 4px;border-radius:4px}
 .hint{color:var(--muted);font-size:13px}
+#files{display:none;flex-wrap:wrap;gap:6px;padding:8px 14px 0;border-top:1px solid var(--line)}
+#files.on{display:flex}
+#files + footer{border-top:0}
+.chip{display:flex;align-items:center;gap:6px;font-size:13px;background:var(--card);border:1px solid var(--line);border-radius:8px;padding:4px 4px 4px 8px;max-width:100%}
+.chip span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.chip button{padding:2px 7px;background:transparent;color:var(--muted);font-size:15px;line-height:1}
+#attach{padding:0 12px;font-size:20px;line-height:1}
+.msg .files{font-size:12px;opacity:.85;margin-top:4px}
 #memtext{font:14px/1.45 ui-monospace,Menlo,Consolas,monospace;color:var(--fg);background:var(--card);border:1px solid var(--line);border-radius:8px;padding:10px;width:100%;min-height:45vh;resize:vertical}
 .ev{margin:0 0 10px}
 .task{font-weight:600;margin-top:14px}
@@ -853,7 +977,10 @@ input{font:inherit;font-size:16px;color:var(--fg);background:var(--card);border:
   <input id="reason" placeholder="Reason if denying (optional)" style="margin-top:8px">
   <div class="btns"><button class="deny" id="deny">Deny</button><button class="approve" id="approve">Approve</button></div>
 </div>
+<div id="files"></div>
 <footer>
+  <button class="ghost" id="attach" aria-label="Attach files" title="Attach files">+</button>
+  <input type="file" id="filepick" multiple hidden>
   <input id="task" placeholder="Give the agent a task" autocomplete="off" enterkeyhint="send">
   <button id="send">Send</button>
 </footer>
@@ -910,9 +1037,13 @@ async function post(path, body){
 $("send").onclick = () => {
   if (view === "chat" && chatAbort) { chatAbort.abort(); return; }
   const t = $("task").value.trim();
-  if (!t) return;
+  if (!t && !attached.length) return;
+  if (attached.some(f => f.reading)) { alert("Still reading a file."); return; }
+  const files = attached.map(f => ({name: f.name, text: f.text}));
   $("task").value = "";
-  if (view === "chat") sendChat(t); else post("api/task", {task: t});
+  attached = [];
+  renderFiles();
+  if (view === "chat") sendChat(t, files); else post("api/task", {task: t, files});
 };
 $("task").addEventListener("keydown", e => { if (e.key === "Enter") $("send").click(); });
 $("approve").onclick = () => { if (pendingId) { const id = pendingId; pendingId = "sent"; post("api/decision", {id: id, approve: true}); } };
@@ -957,6 +1088,7 @@ function showView(v){
   for (const name of VIEWS) $(name).classList.toggle("on", name === v);
   for (const b of $("tabs").children) b.classList.toggle("on", b.dataset.view === v);
   document.querySelector("footer").style.display = (v === "chat" || v === "log") ? "" : "none";
+  renderFiles();
   $("task").placeholder = v === "chat" ? "Message" : "Give the agent a task";
   history.replaceState(null, "", "#" + v);
   try { localStorage.setItem("view", v); } catch (e) {}
@@ -994,12 +1126,75 @@ function rich(box, text){
   }
   prose(text.slice(at));
 }
-function addMsg(role, text){
+function addMsg(role, text, files){
   const d = el("div", "msg " + role);
   if (role === "assistant") rich(d, text); else d.textContent = text;
+  if (files && files.length) d.append(el("div", "files", "Attached: " + files.map(f => f.name).join(", ")));
   $("msgs").append(d);
   return d;
 }
+
+// ---------- attachments ----------
+// Files are turned into text on the server first, so the page can show how long the
+// model will take to read them. Chat puts the text in the message (first 16,000
+// characters); Tasks saves each file into the agent's workspace.
+let attached = [];
+const READ_RATE = {better: 17, faster: 35};  // tokens per second, measured on the server
+function readTime(chars){
+  const s = Math.round(chars / 4 / READ_RATE[$("chatmodel").value || "better"]);
+  return s < 60 ? "about " + Math.max(s, 1) + " s to read" : "about " + Math.round(s / 60) + " min to read";
+}
+function renderFiles(){
+  const box = $("files");
+  box.replaceChildren();
+  let left = 16000;
+  for (const f of attached) {
+    const chip = el("div", "chip");
+    let label = f.name;
+    if (f.reading) label += ", reading...";
+    else if (view === "chat") {
+      const used = Math.min(f.chars, Math.max(left, 0));
+      left -= used;
+      label += ", " + f.chars.toLocaleString() + " characters" + (used < f.chars ? ", first " + used.toLocaleString() + " used" : "") + ", " + readTime(used);
+    } else label += ", " + f.chars.toLocaleString() + " characters, saved to the workspace";
+    chip.title = label;
+    const x = el("button", null, "\u00d7");
+    x.setAttribute("aria-label", "Remove " + f.name);
+    x.onclick = () => { attached = attached.filter(a => a !== f); renderFiles(); };
+    chip.append(el("span", null, label), x);
+    box.append(chip);
+  }
+  box.classList.toggle("on", attached.length > 0 && (view === "chat" || view === "log"));
+}
+async function toBase64(file){
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  let s = "";
+  for (let i = 0; i < bytes.length; i += 0x8000) s += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+  return btoa(s);
+}
+async function addFile(file){
+  if (file.size > 5e6) { alert(file.name + " is over 5 MB."); return; }
+  const f = {name: file.name, reading: true, chars: 0, text: ""};
+  attached.push(f);
+  renderFiles();
+  try {
+    const r = await fetch("api/extract", {method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({name: file.name, data: await toBase64(file)})});
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(d.detail || ("Error " + r.status));
+    Object.assign(f, {name: d.name, text: d.text, chars: d.chars, reading: false});
+  } catch (e) {
+    attached = attached.filter(a => a !== f);
+    alert(file.name + ": " + e.message);
+  }
+  renderFiles();
+}
+$("attach").onclick = () => $("filepick").click();
+$("filepick").onchange = async () => {
+  const picked = [...$("filepick").files];
+  $("filepick").value = "";
+  for (const file of picked) await addFile(file);
+};
 async function loadChatList(){
   let list = [];
   try { list = await (await fetch("api/chats")).json(); } catch (e) {}
@@ -1020,14 +1215,15 @@ async function openChat(id){
     const r = await fetch("api/chats/" + encodeURIComponent(id));
     if (!r.ok) { openChat(""); return; }
     const c = await r.json();
-    for (const m of c.messages) addMsg(m.role, m.content);
+    for (const m of c.messages) addMsg(m.role, m.text || m.content, m.files);
   } catch (e) {}
   $("chat").scrollTop = $("chat").scrollHeight;
 }
-async function sendChat(text){
+async function sendChat(text, files){
   if (chatAbort) return;
   if (!chatId) $("msgs").replaceChildren();
-  addMsg("user", text);
+  files = files || [];
+  addMsg("user", text || (files.length > 1 ? "Summarize the attached files." : "Summarize the attached file."), files);
   const out = addMsg("assistant", "Thinking. After a pause or a model switch, the first reply can take a minute.");
   out.classList.add("typing");
   const box = $("chat");
@@ -1037,7 +1233,7 @@ async function sendChat(text){
   let got = "";
   try {
     const r = await fetch("api/chat", {method: "POST", headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({message: text, chat_id: chatId, model: $("chatmodel").value}), signal: chatAbort.signal});
+      body: JSON.stringify({message: text, chat_id: chatId, model: $("chatmodel").value, files}), signal: chatAbort.signal});
     if (!r.ok) {
       const t = await r.json().catch(() => ({}));
       out.textContent = t.detail || ("Error " + r.status);
@@ -1075,7 +1271,7 @@ $("chatdel").onclick = async () => {
   loadChatList();
 };
 try { $("chatmodel").value = localStorage.getItem("chatmodel") || "better"; } catch (e) {}
-$("chatmodel").onchange = () => { try { localStorage.setItem("chatmodel", $("chatmodel").value); } catch (e) {} };
+$("chatmodel").onchange = () => { try { localStorage.setItem("chatmodel", $("chatmodel").value); } catch (e) {} renderFiles(); };
 
 // ---------- memory ----------
 let memMax = 2000;
