@@ -1492,7 +1492,7 @@ function mailCard(m, withJob){
 function inboxSetup(box, error){
   const c = el("div", "card setup");
   c.append(el("strong", null, "Connect the agent's inbox"),
-    el("div", "thought", "An address just for applications. The agent reads it every 5 minutes without marking anything read: confirmations mark jobs Applied, interview requests and rejections move them along, and verification codes show up here and as alerts. Links in emails are never opened. For Gmail, turn on 2-step verification and make an app password under Google Account, Security, App passwords. Your profile's email becomes this address."));
+    el("div", "thought", "An address just for applications. The agent reads it every 5 minutes without marking anything read: confirmations mark jobs Applied, interview requests and rejections move them along, and verification codes show up here and as alerts. Links in emails are never opened. Use an app password, not the account password: in Yahoo, Account Info, Account Security, Generate app password; in Gmail, turn on 2-step verification, then Google Account, Security, App passwords. Your profile's email becomes this address."));
   const addr = el("input"); addr.type = "email"; addr.placeholder = "Address"; addr.autocomplete = "off";
   const pw = el("input"); pw.type = "password"; pw.placeholder = "App password"; pw.autocomplete = "new-password";
   const b = el("button", "approve", "Connect"); b.style.marginTop = "8px";

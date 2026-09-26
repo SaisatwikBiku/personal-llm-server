@@ -1293,6 +1293,7 @@ IMAP_HOSTS = {  # the server comes from the address, never from input
     "gmail.com": "imap.gmail.com", "googlemail.com": "imap.gmail.com",
     "icloud.com": "imap.mail.me.com", "me.com": "imap.mail.me.com",
     "fastmail.com": "imap.fastmail.com", "yahoo.com": "imap.mail.yahoo.com",
+    "ymail.com": "imap.mail.yahoo.com", "rocketmail.com": "imap.mail.yahoo.com",
 }
 ADDRESS_RE = re.compile(r"^[A-Za-z0-9._%+-]{1,64}@([A-Za-z0-9.-]{1,100})$")
 INBOX_KEEP = 300          # messages kept for the panel, newest first
@@ -1337,7 +1338,7 @@ def imap_login(address, password):
         conn.login(address, password)
     except imaplib.IMAP4.error:
         conn.logout()
-        raise ValueError("The mail server refused the login. For Gmail, use an app password, not the account password.")
+        raise ValueError("The mail server refused the login. Use an app password, not the account password.")
     return conn
 
 
