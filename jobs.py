@@ -1372,7 +1372,8 @@ def message_text(msg):
 
 def classify_email(subject, text):
     both = subject + "\n" + text[:4000]
-    if VERIFY_RE.search(subject):
+    # "2-Step Verification turned on" is a notice; a verification email asks for something
+    if VERIFY_RE.search(subject) and (CODE_RE.search(both) or re.search(r"verify|confirm|activate|code", subject, re.I)):
         return "verification"
     if REJECT_RE.search(both):
         return "rejection"
