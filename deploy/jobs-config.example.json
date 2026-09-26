@@ -159,7 +159,7 @@
   ]
  },
  "max_scored_per_run": 300,
- "max_drafts_per_run": 15,
+ "max_drafts_per_run": 60,
  "draft_model": "qwen3:8b",
  "good_score": 60,
  "strong_score": 72

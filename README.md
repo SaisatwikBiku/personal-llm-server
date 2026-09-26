@@ -257,7 +257,7 @@ sudo install -o agentd -g agentd -m 600 ~/profile.json ~/resume.txt /home/agentd
 
 Fill in `profile.json` from `deploy/jobs-profile.example.json`. An empty field makes the matching form question show up as one to answer yourself. Edit `config.json` to change roles, companies (board names as they appear in the job board URLs; for Workday, `<tenant>.wdN/<site>` from a URL like `https://mtb.wd5.myworkdayjobs.com/MTB/job/...`, and for SmartRecruiters the company name from `https://jobs.smartrecruiters.com/<company>/...`), the run and digest times, and the score thresholds; the next run picks up the change without a restart. The first run happens at the next `run_at` time, or right away from Run now in the Jobs view.
 
-Each run can score up to 300 postings (`max_scored_per_run`), about 100 minutes of model time at 20 seconds each, and the rest wait for the next night. Panel tasks take priority: the job search waits whenever a task is running.
+Each run can score up to 300 postings (`max_scored_per_run`), about 100 minutes of model time at 20 seconds each, and the rest wait for the next night. It then drafts answers for up to 60 strong matches (`max_drafts_per_run`), about 2 minutes each with the 8B, so a full run ends around 5 a.m. Other jobs can be drafted on demand with Prepare answers on their card. Panel tasks take priority: the job search waits whenever a task is running.
 
 ### Autofill
 
