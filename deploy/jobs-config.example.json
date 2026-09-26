@@ -11,7 +11,14 @@
   "database administrator",
   "database engineer",
   "database reliability",
-  "swe"
+  "swe",
+  "software development engineer",
+  "sde",
+  "application developer",
+  "applications developer",
+  "java developer",
+  "python developer",
+  "programmer analyst"
  ],
  "exclude_titles": [
   "senior",
@@ -31,7 +38,9 @@
   "iii",
   "iv",
   "3",
-  "4"
+  "4",
+  "5",
+  "6"
  ],
  "max_years": 4,
  "exclude_no_sponsorship": false,
@@ -42,6 +51,14 @@
   "full stack engineer",
   "data engineer",
   "database administrator"
+ ],
+ "workday_search": [
+  "software engineer",
+  "software developer",
+  "data engineer",
+  "database",
+  "full stack",
+  "backend"
  ],
  "companies": {
   "greenhouse": [
@@ -100,6 +117,45 @@
    "perplexity",
    "neon",
    "linear"
+  ],
+  "workday": [
+   "capitalone.wd12/Capital_One",
+   "citi.wd5/2",
+   "mtb.wd5/MTB",
+   "travelers.wd5/External",
+   "thehartford.wd5/Careers_External",
+   "geico.wd1/External",
+   "allstate.wd5/allstate_careers",
+   "nationwide.wd1/Nationwide_Career",
+   "usaa.wd1/USAAJOBSWD",
+   "pru.wd5/Careers",
+   "statestreet.wd1/Global",
+   "mastercard.wd1/CorporateCareers",
+   "ms.wd5/External",
+   "finra.wd1/FINRA",
+   "barclays.wd3/External_Career_Site_Barclays",
+   "cvshealth.wd1/CVS_Health_Careers",
+   "humana.wd5/Humana_External_Career_Site",
+   "elevancehealth.wd1/ANT",
+   "regeneron.wd1/Careers",
+   "globalfoundries.wd1/External",
+   "geaerospace.wd5/GE_ExternalSite",
+   "cornell.wd1/CornellCareerPage",
+   "rochester.wd5/UR_Staff",
+   "target.wd5/targetcareers",
+   "adobe.wd5/external_experienced",
+   "hpe.wd5/Jobsathpe",
+   "micron.wd1/External"
+  ],
+  "smartrecruiters": [
+   "ServiceNow",
+   "NBCUniversal3",
+   "AbbVie",
+   "Experian",
+   "WesternDigital",
+   "BoschGroup",
+   "Canva",
+   "Wix2"
   ]
  },
  "max_scored_per_run": 200,

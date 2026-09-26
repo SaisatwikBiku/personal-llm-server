@@ -5,7 +5,8 @@ server.py runs this on a schedule inside the panel process. It never submits an
 application. It prepares the answers and Sai applies through the posting link.
 
 Network access is limited to URLs this module builds itself: the public job board
-APIs of Greenhouse, Lever and Ashby, and the local SearXNG. Model output never
+APIs of Greenhouse, Lever, Ashby, Workday (<tenant>.wdN.myworkdayjobs.com) and
+SmartRecruiters, and the local SearXNG. Model output never
 becomes a URL or request data, and no personal data leaves the machine.
 
 Files in JOBS_DIR (default /home/agentd/jobs, which the agent user can't read):
@@ -40,20 +41,31 @@ MAX_DISCOVERED = 60       # companies found through search, most recent kept
 SCORE_VERSION = 2         # bump to rescore everything with a new method
 SEEN_DAYS = 90            # forget skipped openings after this; they are re-checked if still listed
 TOKEN_RE = re.compile(r"^[A-Za-z0-9_.-]{1,80}$")
+# Workday boards are "<tenant>.wdN/<site>", as in mtb.wd5.myworkdayjobs.com/MTB
+WORKDAY_RE = re.compile(r"^[a-z0-9-]{1,60}\.wd\d{1,3}/[A-Za-z0-9_-]{1,80}$")
+WORKDAY_PAGES = 5         # 20 postings a page, per search term
+SMARTRECRUITERS_PAGES = 10  # 100 postings a page
+REQUEST_PAUSE = 0.2       # seconds between requests to the same board
 
 DEFAULTS = {
     "timezone": "America/New_York",
     "run_at": "01:00",
     "digest_at": "08:00",
     "roles": ["software engineer", "software developer", "full stack", "back end",
-              "data engineer", "database administrator", "database engineer", "database reliability", "swe"],
+              "data engineer", "database administrator", "database engineer", "database reliability", "swe",
+              "software development engineer", "sde", "application developer", "applications developer",
+              "java developer", "python developer", "programmer analyst"],
     "exclude_titles": ["senior", "sr", "staff", "principal", "lead", "manager", "director",
                        "head", "vp", "architect", "distinguished", "fellow", "intern",
-                       "internship", "iii", "iv", "3", "4"],
+                       "internship", "iii", "iv", "3", "4", "5", "6"],
     "search_roles": ["software engineer new grad", "backend engineer", "full stack engineer",
                      "data engineer", "database administrator"],
     "search": True,
-    "companies": {"greenhouse": [], "lever": [], "ashby": []},
+    "companies": {"greenhouse": [], "lever": [], "ashby": [], "workday": [], "smartrecruiters": []},
+    # Workday boards hold every job a company has (banks list thousands), so they are
+    # searched with these terms instead of read whole.
+    "workday_search": ["software engineer", "software developer", "data engineer", "database",
+                       "full stack", "backend"],
     "max_years": 4,
     "exclude_no_sponsorship": False,
     "max_scored_per_run": 200,
@@ -158,7 +170,8 @@ US_RE = re.compile(
     r"new hampshire|new jersey|new mexico|north carolina|north dakota|ohio|oklahoma|oregon|"
     r"pennsylvania|rhode island|south carolina|south dakota|tennessee|texas|utah|vermont|"
     r"virginia|wisconsin|wyoming", re.I)
-STATE_RE = re.compile(r"(?:,|-|\()\s*(" + "|".join(US_STATES) + r")\b")
+# "Buffalo, NY", "Remote (NY)", and Workday's "CT - Hartford" (state first)
+STATE_RE = re.compile(r"(?:^|,|-|\(|/)\s*(" + "|".join(US_STATES) + r")\b")
 NON_US_RE = re.compile(
     r"canada|toronto|vancouver|montreal|united kingdom|\buk\b|london|england|ireland|dublin|"
     r"germany|berlin|munich|france|paris|spain|madrid|barcelona|netherlands|amsterdam|poland|"
@@ -213,10 +226,20 @@ def years_required(text):
 
 # ---------- sources ----------
 
-def get_json(url):
-    req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+def get_json(url, body=None):
+    """GET, or POST when body is given (Workday's search takes a JSON body)."""
+    headers = {"User-Agent": USER_AGENT, "Accept": "application/json"}
+    data = None
+    if body is not None:
+        data = json.dumps(body).encode()
+        headers["Content-Type"] = "application/json"
+    req = urllib.request.Request(url, data=data, headers=headers)
     with urllib.request.urlopen(req, timeout=40) as resp:
         return json.load(resp)
+
+
+def valid_token(ats, token):
+    return bool((WORKDAY_RE if ats == "workday" else TOKEN_RE).match(token or ""))
 
 
 def ms_to_iso(ms):
@@ -226,7 +249,7 @@ def ms_to_iso(ms):
         return ""
 
 
-def fetch_greenhouse(token):
+def fetch_greenhouse(token, _cfg=None, _seen=()):
     data = get_json(f"https://boards-api.greenhouse.io/v1/boards/{token}/jobs?content=true")
     for j in data.get("jobs", []):
         yield {
@@ -240,7 +263,7 @@ def fetch_greenhouse(token):
         }
 
 
-def fetch_lever(token):
+def fetch_lever(token, _cfg=None, _seen=()):
     for j in get_json(f"https://api.lever.co/v0/postings/{token}?mode=json"):
         cats = j.get("categories") or {}
         lists = "\n".join(f"{x.get('text', '')}\n{html_to_text(x.get('content', ''))}"
@@ -260,7 +283,7 @@ def fetch_lever(token):
         }
 
 
-def fetch_ashby(token):
+def fetch_ashby(token, _cfg=None, _seen=()):
     data = get_json(f"https://api.ashbyhq.com/posting-api/job-board/{token}")
     for j in data.get("jobs", []):
         if j.get("isListed") is False:
@@ -280,19 +303,119 @@ def fetch_ashby(token):
         }
 
 
-FETCHERS = {"greenhouse": fetch_greenhouse, "lever": fetch_lever, "ashby": fetch_ashby}
+def workday_posted(det):
+    """Workday gives a start date, or only text like "Posted 3 Days Ago"."""
+    if det.get("startDate"):
+        return det["startDate"]
+    text = (det.get("postedOn") or "").lower()
+    days = 0 if "today" in text else 1 if "yesterday" in text else None
+    m = re.search(r"(\d+)\+? days", text)
+    if m:
+        days = int(m.group(1))
+    if days is None:
+        return ""
+    return (datetime.now(timezone.utc) - timedelta(days=days)).date().isoformat()
+
+
+def fetch_workday(board, cfg, seen=()):
+    """Search a Workday board with the configured terms, then read the details of each
+    new posting whose title and location pass. Workday lists hold only the title,
+    location and path; the description takes one request per posting."""
+    tenant_wd, site = board.split("/", 1)
+    tenant, wd = tenant_wd.split(".", 1)
+    base = f"https://{tenant}.{wd}.myworkdayjobs.com/wday/cxs/{tenant}/{site}"
+    found = {}
+    for term in cfg["workday_search"]:
+        for page in range(WORKDAY_PAGES):
+            data = get_json(f"{base}/jobs", {"appliedFacets": {}, "limit": 20,
+                                             "offset": page * 20, "searchText": term})
+            posts = data.get("jobPostings") or []
+            for p in posts:
+                if p.get("externalPath"):
+                    found.setdefault(p["externalPath"], p)
+            time.sleep(REQUEST_PAUSE)
+            if len(posts) < 20 or (page + 1) * 20 >= (data.get("total") or 0):
+                break
+    for path, p in found.items():
+        jid = f"workday:{board}:{path}"
+        loc = p.get("locationsText", "")
+        several = re.fullmatch(r"\d+ Locations", loc)  # the real list is in the details
+        if jid in seen or not title_ok(p.get("title", ""), cfg) or not (several or location_ok(loc)):
+            continue
+        det_all = get_json(base + path)
+        det = det_all.get("jobPostingInfo") or {}
+        time.sleep(REQUEST_PAUSE)
+        locs = [det.get("location", "")] + list(det.get("additionalLocations") or [])
+        org = re.sub(r"^\d+\s+", "", (det_all.get("hiringOrganization") or {}).get("name", ""))
+        yield {
+            "id": jid,
+            "company": org or tenant,
+            "title": det.get("title") or p.get("title", ""),
+            "location": " / ".join(filter(None, locs)) or loc,
+            "url": det.get("externalUrl") or f"https://{tenant}.{wd}.myworkdayjobs.com/{site}{path}",
+            "posted": workday_posted(det),
+            "description": html_to_text(det.get("jobDescription", "")),
+        }
+
+
+def fetch_smartrecruiters(company, cfg, seen=()):
+    """List a company's US postings, then read the details of each new one whose
+    title passes."""
+    base = f"https://api.smartrecruiters.com/v1/companies/{company}/postings"
+    for page in range(SMARTRECRUITERS_PAGES):
+        data = get_json(f"{base}?limit=100&offset={page * 100}&country=us")
+        posts = data.get("content") or []
+        for p in posts:
+            jid = f"smartrecruiters:{company}:{p.get('id')}"
+            where = p.get("location") or {}
+            loc = where.get("fullLocation") or ", ".join(filter(None, [where.get("city"), where.get("region")]))
+            if where.get("remote") and "remote" not in loc.lower():
+                loc = f"{loc} (Remote)".strip()
+            if jid in seen or not title_ok(p.get("name", ""), cfg) or not location_ok(loc):
+                continue
+            det = get_json(f"{base}/{urllib.parse.quote(str(p.get('id')))}")
+            time.sleep(REQUEST_PAUSE)
+            sections = ((det.get("jobAd") or {}).get("sections") or {})
+            text = "\n\n".join(html_to_text((sections.get(k) or {}).get("text", ""))
+                               for k in ("jobDescription", "qualifications", "additionalInformation"))
+            yield {
+                "id": jid,
+                "company": (p.get("company") or {}).get("name") or company,
+                "title": p.get("name", ""),
+                "location": loc,
+                "url": det.get("postingUrl") or f"https://jobs.smartrecruiters.com/{company}/{p.get('id')}",
+                "posted": p.get("releasedDate", ""),
+                "description": text.strip(),
+            }
+        time.sleep(REQUEST_PAUSE)
+        if len(posts) < 100 or (page + 1) * 100 >= (data.get("totalFound") or 0):
+            break
+
+
+FETCHERS = {"greenhouse": fetch_greenhouse, "lever": fetch_lever, "ashby": fetch_ashby,
+            "workday": fetch_workday, "smartrecruiters": fetch_smartrecruiters}
 SEARCH_HOSTS = {"greenhouse": "job-boards.greenhouse.io", "lever": "jobs.lever.co",
-                "ashby": "jobs.ashbyhq.com"}
-BOARD_URL_RE = {
+                "ashby": "jobs.ashbyhq.com", "workday": "myworkdayjobs.com",
+                "smartrecruiters": "jobs.smartrecruiters.com"}
+BOARD_URL_RE = {  # the groups joined with "" (Workday with "." and "/") make the board name
     "greenhouse": re.compile(r"^https://(?:job-boards|boards)\.greenhouse\.io/([A-Za-z0-9_-]+)/jobs/\d+"),
     "lever": re.compile(r"^https://jobs\.lever\.co/([A-Za-z0-9_.-]+)/[0-9a-f-]{36}"),
     "ashby": re.compile(r"^https://jobs\.ashbyhq\.com/([A-Za-z0-9_.-]+)/[0-9a-f-]{36}"),
+    "workday": re.compile(r"^https://([a-z0-9-]+)\.(wd\d+)\.myworkdayjobs\.com/(?:[a-z]{2}-[A-Z]{2}/)?([A-Za-z0-9_-]+)/job/"),
+    "smartrecruiters": re.compile(r"^https://jobs\.smartrecruiters\.com/([A-Za-z0-9_-]+)/\d+"),
 }
+
+
+def board_from_match(ats, m):
+    if ats == "workday":
+        return f"{m.group(1)}.{m.group(2)}/{m.group(3)}"
+    # Workday and SmartRecruiters names are case-sensitive; the others are not
+    return m.group(1) if ats == "smartrecruiters" else m.group(1).lower()
 
 
 def discover(cfg):
     """Find more company boards through SearXNG. Only the board name is kept from each
-    result, and only when the result URL matches one of the three job board hosts."""
+    result, and only when the result URL matches one of the job board hosts."""
     found = set()
     for role in cfg["search_roles"]:
         for ats, host in SEARCH_HOSTS.items():
@@ -303,8 +426,9 @@ def discover(cfg):
                 continue
             for r in data.get("results", []):
                 m = BOARD_URL_RE[ats].match(r.get("url", ""))
-                if m and TOKEN_RE.match(m.group(1)):
-                    found.add((ats, m.group(1).lower()))
+                board = m and board_from_match(ats, m)
+                if board and valid_token(ats, board):
+                    found.add((ats, board))
     return found
 
 
@@ -574,8 +698,9 @@ def _run(is_busy):
              "filtered": {}, "scored": 0, "drafted": 0, "backlog": 0}
     update_db(lambda db: db["meta"].update(last_run_date=today(cfg).date().isoformat()))
 
-    boards = {(ats, t.lower()) for ats, ts in cfg["companies"].items() if ats in FETCHERS
-              for t in ts if TOKEN_RE.match(t)}
+    boards = {(ats, t if ats in ("workday", "smartrecruiters") else t.lower())
+              for ats, ts in cfg["companies"].items() if ats in FETCHERS
+              for t in ts if valid_token(ats, t)}
     if cfg["search"]:
         set_progress("searching for more companies")
         found = discover(cfg)
@@ -597,7 +722,7 @@ def _run(is_busy):
     for i, (ats, token) in enumerate(sorted(boards), 1):
         set_progress(f"reading {ats}/{token}", i, len(boards))
         try:
-            postings = list(FETCHERS[ats](urllib.parse.quote(token)))
+            postings = list(FETCHERS[ats](urllib.parse.quote(token), cfg, seen))
         except Exception as e:
             stats["board_errors"].append(f"{ats}/{token}: {e}"[:120])
             continue
