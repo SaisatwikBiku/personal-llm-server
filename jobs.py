@@ -26,7 +26,7 @@ import threading
 import time
 import urllib.parse
 import urllib.request
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -1072,9 +1072,12 @@ def ready(job, cfg):
 
 
 def queue_candidates(db, cfg):
-    """The jobs that belong in the review list, best first, ready or not."""
+    """The jobs that belong in the review list, best first, ready or not. Jobs a hiring
+    rule blocks are left out, so no time goes into them."""
+    ctx = rules_context(db)
     jobs = [j for j in db["jobs"].values()
-            if j["status"] == "new" and auto_apply_ok(j) and (j.get("score") or 0) >= cfg["good_score"]]
+            if j["status"] == "new" and auto_apply_ok(j) and (j.get("score") or 0) >= cfg["good_score"]
+            and not blocked(check_rules(j, ctx))]
     jobs.sort(key=lambda j: -(j.get("score") or 0))
     return jobs[:cfg["queue_size"]]
 
@@ -1206,8 +1209,10 @@ def summary():
     cfg = load_config()
     with db_lock:
         db = load_db()
+    ctx = rules_context(db)
     jobs = [{k: j.get(k) for k in SUMMARY_KEYS} | {"prepared": j.get("answers") is not None,
-                                                    "docs": j.get("docs") is not None}
+                                                    "docs": j.get("docs") is not None,
+                                                    "flags": check_rules(j, ctx) if j["status"] in ("new", "approved") else []}
             for j in db["jobs"].values() if j.get("score") is not None]
     jobs.sort(key=lambda j: (-(j["score"] or 0), j["found"] or ""))
     meta = db["meta"]
@@ -1252,8 +1257,9 @@ def detail(job_id):
         return None
     if job.get("answers") is not None:
         job["answers"] = refresh_answers(job, load_json(JOBS_DIR / "profile.json", {}))
+    flags = check_rules(job, rules_context()) if job["status"] in ("new", "approved") else []
     return {**job, "apply_url": apply_url(job), "emails": job_emails(job_id),
-            "auto_apply": auto_apply_ok(job)}
+            "auto_apply": auto_apply_ok(job), "flags": flags, "ai_restricted": ai_restricted(job)}
 
 
 def profile_form():
@@ -1359,11 +1365,12 @@ def fill(page_url, fields):
         ftype = str(f.get("type", ""))
         options = [str(o)[:200] for o in (f.get("options") or [])][:100]
         a = stored.get(norm_label(label))
-        docs = (job or {}).get("docs") or {}
+        no_ai = bool(job) and ai_restricted(job)  # the form's AI policy: only Sai's own words
+        docs = {} if no_ai else (job or {}).get("docs") or {}
         is_cover = re.search(r"cover", label + " " + str(f.get("name", "")), re.I)
         if ftype == "file":  # which document goes in this upload
             a = ({"kind": "file", "doc": "cover"} if docs.get("cover") else {"kind": "you"}) if is_cover \
-                else {"kind": "file", "doc": "resume"}
+                else {"kind": "file", "doc": "base" if no_ai else "resume"}
             out.append({"i": i, "kind": a["kind"], "value": None, "doc": a.get("doc")})
             continue
         if is_cover and docs.get("cover") and ftype == "textarea":
@@ -1385,6 +1392,8 @@ def fill(page_url, fields):
                 a = {"kind": "fact", "a": str(profile.get("full_name") or "")}
             else:
                 a = {"kind": "consent", "a": "agree"}
+        if no_ai and a["kind"] == "draft" and not overrides.get(norm_label(label)):
+            a = {"kind": "you"}
         value = a.get("a") if a["kind"] in ("fact", "draft", "consent") else None
         out.append({"i": i, "kind": a["kind"], "value": value})
     name = str(profile.get("full_name") or "Resume").replace(" ", "_")
@@ -1645,6 +1654,8 @@ def doc_file(job_id, kind):
     job, r = detail(job_id) if job_id else None, load_resume()
     base = str(profile.get("full_name") or (r or {}).get("name") or "Resume").replace(" ", "_")
     docs = (job or {}).get("docs")
+    if kind == "base":
+        docs = None
     if kind == "cover":
         if not (job and docs and r and docs.get("cover")):
             return None, None
@@ -1653,6 +1664,279 @@ def doc_file(job_id, kind):
         return render_resume(r, docs, profile), f"{base}_Resume.pdf"
     data = resume_pdf()
     return (data, f"{base}_Resume.pdf") if data else (None, None)
+
+
+# ---------- hiring rules ----------
+# Checks for applications an employer's own rules would reject or hold against Sai:
+# duplicates, company caps, cooldowns, eligibility, inconsistent answers, AI-use
+# policies. They're fixed code over jobs.json and the profile, not something the model
+# learns. Each rule's action is block (out of Review and Apply), ask (Approve becomes
+# "Approve anyway"), warn (a note) or off; Sai sets them under You > Rules, and the
+# settings live in jobs.json meta["rules"].
+
+ACTIVE = ("approved", "applied", "interview")
+RULES = [  # (id, title, default action, what it checks)
+    ("already_applied", "Same posting twice", "block", "This posting is already applied to."),
+    ("repost", "Reposted opening", "ask", "Same company, title and location as a job applied to in the last 60 days."),
+    ("company_cap", "Company application cap", "block", "Applications at one company within a window: 3 in 30 days unless set per company (Google: 3 in 90)."),
+    ("role_spread", "Unrelated roles at one company", "ask", "More than 2 kinds of role (software, data, database, ML, infrastructure) active at one company."),
+    ("same_day", "Pace per company", "warn", "Two or more applications to one company today."),
+    ("ats_daily", "Pace per application system", "warn", "25 or more submissions today on one system (Greenhouse, Lever, Ashby)."),
+    ("cooldown", "Reapplying after a rejection", "block", "A rejection at this company for the same kind of role: 180 days after interviews; screen rejections only ask."),
+    ("interviewing", "Already interviewing there", "ask", "Another job at this company is in interviews; tell your recruiter instead."),
+    ("withdrew", "Withdrew or declined there", "ask", "You withdrew or declined at this company in the last 180 days."),
+    ("grad_window", "Graduation window", "block", "The posting or form names graduation years your graduation date isn't in."),
+    ("citizenship", "Citizenship or clearance", "block", "The posting requires U.S. citizenship, a clearance or U.S. person status you don't have."),
+    ("no_sponsor", "No sponsorship", "ask", "The posting won't sponsor and your profile says you'll need sponsorship."),
+    ("years", "Experience well above yours", "warn", "The posting asks for more than 2 years beyond your experience."),
+    ("phd", "Doctorate required", "warn", "The posting requires a PhD your profile doesn't have."),
+    ("onsite", "On-site you can't accept", "ask", "An on-site or relocation requirement while your profile says No to relocating."),
+    ("consistency", "Different answers to one company", "ask", "Salary, start date, relocation or sponsorship answers differ from another application at this company."),
+    ("resume_consistency", "Different resumes to one company", "warn", "Another application at this company in the last 60 days used a different tailored resume."),
+    ("ai_policy", "AI-use policy", "ask", "The form has an AI-use policy. Approve anyway to use the model's drafts, summary and cover letter there."),
+    ("referral", "Referral or agency on file", "block", "You noted a referral or an agency submission at this company; a direct application can break it."),
+    ("conflicts", "Conflict answers", "ask", "The form asks about non-competes or government ties and your profile says Yes."),
+]
+RULE_IDS = [r[0] for r in RULES]
+RULE_ORDER = {"block": 0, "ask": 1, "warn": 2}
+DEFAULT_LIMITS = {"google": {"max": 3, "days": 90}}
+FAMILY_RES = [
+    ("database", re.compile(r"database|\bdba\b|db reliability", re.I)),
+    ("data", re.compile(r"\bdata (engineer|platform|infrastructure|pipeline)|analytics|\betl\b|big data", re.I)),
+    ("ml", re.compile(r"machine learning|\bml\b|\bai engineer|applied (ai|ml)|research engineer", re.I)),
+    ("infrastructure", re.compile(r"devops|\bsre\b|site reliability|infrastructure|platform|cloud engineer", re.I)),
+]
+GRAD_CONTEXT_RE = re.compile(r"new ?grad(?:uate)?\b[^.\n]{0,40}|class of [^.\n]{0,30}|graduat\w*[^.\n]{0,120}", re.I)
+# a season or month before a year: "Fall 2026", "Dec 2026", "May '27" isn't matched
+TERM_RE = re.compile(r"\b(?:(spring|summer|fall|autumn|winter|jan\w*|feb\w*|mar\w*|apr\w*|may|june?|july?|aug\w*|"
+                     r"sep\w*|oct\w*|nov\w*|dec\w*)\.?\s*)?(20\d\d)\b", re.I)
+TERM_MONTH = {"spring": 5, "summer": 8, "fall": 12, "autumn": 12, "winter": 12, "jan": 1, "feb": 2, "mar": 3, "apr": 4,
+              "may": 5, "jun": 6, "jul": 7, "aug": 8, "sep": 9, "oct": 10, "nov": 11, "dec": 12}
+AI_POLICY_RE = re.compile(r"\bAI\b[^.\n]{0,40}(policy|assist|tools?|use)|artificial intelligence|use of (ai|generative)|"
+                          r"chatgpt|without (the )?(use of )?ai|do not use ai", re.I)
+ONSITE_RE = re.compile(r"(\d|three|four|five) days (a|per) week in (the )?office|in.?office|on.?site|relocat", re.I)
+CONSISTENT_KEYS = ("salary", "start_date", "relocate", "needs_sponsorship", "in_office", "work_authorized")
+
+
+def rule_settings():
+    return rules_context()["settings"]
+
+
+def save_rule_settings(data):
+    actions = {k: v for k, v in (data.get("actions") or {}).items() if k in RULE_IDS and v in ("block", "ask", "warn", "off")}
+    limits = {}
+    for k, v in list((data.get("limits") or {}).items())[:100]:
+        try:
+            limits[company_key(k)] = {"max": max(1, int(v["max"])), "days": max(1, int(v["days"]))}
+        except (KeyError, TypeError, ValueError):
+            continue
+    lim = data.get("limit") or {}
+    notes = {company_key(k): str(v)[:200] for k, v in list((data.get("notes") or {}).items())[:100] if company_key(k) and str(v).strip()}
+    rules = {"actions": actions, "limits": limits, "notes": notes,
+             "limit": {"max": max(1, int(lim.get("max") or 3)), "days": max(1, int(lim.get("days") or 30))},
+             "cooldown_days": max(1, int(data.get("cooldown_days") or 180))}
+    update_db(lambda db: db["meta"].update(rules=rules))
+
+
+def company_key(name):
+    return norm_label(str(name).split(" - ")[0])
+
+
+def role_family(title):
+    for fam, rx in FAMILY_RES:
+        if rx.search(title):
+            return fam
+    return "software"
+
+
+def job_date(j):
+    return (j.get("approved_at") if j["status"] == "approved" else j.get("status_at")) or j.get("found") or ""
+
+
+def days_since(iso):
+    try:
+        return (datetime.now(timezone.utc) - datetime.fromisoformat(iso)).days
+    except (TypeError, ValueError):
+        return 10 ** 6
+
+
+def grad_date(profile):
+    """Sai's graduation as (year, month), from the profile or the resume's first degree."""
+    for text in [str(profile.get("graduation") or "")] + [str(e.get("dates", "")) for e in (load_resume() or {}).get("education", [])[:1]]:
+        terms = TERM_RE.findall(text)
+        if terms:
+            word, year = terms[-1]
+            return int(year), TERM_MONTH.get(word[:3].lower() if word[:3].lower() in TERM_MONTH else word.lower(), 6) if word else 6
+    return None
+
+
+def grad_window(text):
+    """The graduation dates a posting or form asks for, as ((year, month), (year, month)),
+    or None. A bare year covers the whole year; "Fall 2026" is December 2026."""
+    ends = []
+    for ctx in GRAD_CONTEXT_RE.finditer(text):
+        for word, year in TERM_RE.findall(ctx.group()):
+            y = int(year)
+            if not 2015 <= y <= 2035:
+                continue
+            if word:
+                key = word.lower() if word.lower() in TERM_MONTH else word[:3].lower()
+                m = TERM_MONTH.get(key, 6)
+                ends += [(y, m), (y, m)]
+            else:
+                ends += [(y, 1), (y, 12)]
+    return (min(ends), max(ends)) if ends else None
+
+
+def answer_values(job):
+    """The answers to the questions that should match across one company's forms."""
+    out = {}
+    overrides = {norm_label(q): a for q, a in (job.get("overrides") or {}).items()}
+    for a in job.get("answers") or []:
+        key = next((k for pat, k in FACTS if re.search(pat, a["q"], re.I)), None)
+        if key in CONSISTENT_KEYS:
+            v = overrides.get(norm_label(a["q"])) or (a.get("a") if a["kind"] == "fact" else None)
+            if v:
+                out.setdefault(key, v)
+    return out
+
+
+def rules_context(db=None):
+    if db is None:
+        with db_lock:
+            db = load_db()
+    by_company = {}
+    for j in db["jobs"].values():
+        by_company.setdefault(company_key(j["company"]), []).append(j)
+    s = db["meta"].get("rules") or {}
+    settings = {"actions": {**{r[0]: r[2] for r in RULES}, **(s.get("actions") or {})},
+                "limit": s.get("limit") or {"max": 3, "days": 30},
+                "limits": {**DEFAULT_LIMITS, **(s.get("limits") or {})},
+                "cooldown_days": s.get("cooldown_days") or 180, "notes": s.get("notes") or {}}
+    return {"by_company": by_company, "settings": settings,
+            "profile": load_json(JOBS_DIR / "profile.json", {}), "today": datetime.now(timezone.utc).date().isoformat()}
+
+
+def check_rules(job, ctx):
+    """The hiring rules this application would break, as [{rule, action, title, msg}],
+    most serious first. Rules set to off, and ask or warn rules Sai overrode for this
+    job, are left out."""
+    st, prof = ctx["settings"], ctx["profile"]
+    key = company_key(job["company"])
+    others = [j for j in ctx["by_company"].get(key, []) if j["id"] != job["id"]]
+    active = [j for j in others if j["status"] in ACTIVE]
+    fam = role_family(job["title"])
+    text = job.get("description") or ""
+    questions = " \n".join(a["q"] for a in job.get("answers") or [])
+    found = []
+
+    def hit(rule, msg):
+        found.append((rule, msg))
+
+    if job["status"] in ("applied", "interview", "rejected", "withdrew"):
+        hit("already_applied", f"Already {job['status']} ({job_date(job)[:10]}).")
+    same = [j for j in others if j["status"] in ACTIVE + ("rejected",) and norm_title(j["title"]) == norm_title(job["title"])
+            and norm_label(j.get("location", "")) == norm_label(job.get("location", "")) and days_since(job_date(j)) <= 60]
+    if same:
+        hit("repost", f"Looks like a repost of \"{same[0]['title']}\" ({same[0]['status']} {job_date(same[0])[:10]}).")
+    lim = st["limits"].get(key) or st["limit"]
+    recent = [j for j in active if days_since(job_date(j)) <= lim["days"]]
+    if len(recent) >= lim["max"]:
+        hit("company_cap", f"{len(recent)} applications at {job['company']} in the last {lim['days']} days; the cap is {lim['max']}.")
+    fams = {role_family(j["title"]) for j in active} | {fam}
+    if len(fams) > 2:
+        hit("role_spread", f"This would make {len(fams)} kinds of role at {job['company']}: {', '.join(sorted(fams))}.")
+    today = [j for j in active if job_date(j)[:10] == ctx["today"]]
+    if len(today) >= 2:
+        hit("same_day", f"{len(today)} applications to {job['company']} already today.")
+    ats = job["id"].split(":", 1)[0]
+    sent_today = sum(1 for js in ctx["by_company"].values() for j in js
+                     if j["status"] == "applied" and j["id"].startswith(ats + ":") and (j.get("status_at") or "")[:10] == ctx["today"])
+    if sent_today >= 25:
+        hit("ats_daily", f"{sent_today} applications on {ats.title()} today; slow down to avoid looking automated.")
+    for j in others:
+        if j["status"] == "rejected" and role_family(j["title"]) == fam and days_since(j.get("status_at")) <= st["cooldown_days"]:
+            if j.get("interviewed"):
+                hit("cooldown", f"Rejected after interviews for \"{j['title']}\" on {j.get('status_at', '')[:10]}; wait {st['cooldown_days']} days.")
+            elif st["actions"].get("cooldown") != "off":
+                found.append(("cooldown_screen", f"Rejected at the resume screen for \"{j['title']}\" on {j.get('status_at', '')[:10]}."))
+            break
+    inter = [j for j in others if j["status"] == "interview"]
+    if inter:
+        hit("interviewing", f"In interviews for \"{inter[0]['title']}\"; ask your recruiter about this role instead.")
+    wd = [j for j in others if j["status"] == "withdrew" and days_since(j.get("status_at")) <= 180]
+    if wd:
+        hit("withdrew", f"Withdrew from \"{wd[0]['title']}\" on {wd[0].get('status_at', '')[:10]}.")
+    gd = grad_date(prof)
+    win = grad_window(job["title"] + "\n" + text[:8000] + "\n" + questions) if gd else None
+    if win and not win[0] <= gd <= win[1]:
+        fmt = lambda d: date(d[0], d[1], 1).strftime("%b %Y")
+        span = fmt(win[0]) if win[0] == win[1] else f"{fmt(win[0])} to {fmt(win[1])}"
+        hit("grad_window", f"For graduates of {span}; you graduate(d) in {fmt(gd)}.")
+    if BLOCK_RE.search(text) or (re.search(r"requires? access to export.controlled|must be a u\.?s\.? person", questions + text, re.I)
+                                  and str(prof.get("us_person", "")).lower() == "no"):
+        hit("citizenship", "Requires U.S. citizenship, a clearance or U.S. person status.")
+    if job.get("no_sponsorship") and str(prof.get("needs_sponsorship", "")).lower().startswith("y"):
+        hit("no_sponsor", "The posting says it won't sponsor visas.")
+    try:
+        mine = float(re.search(r"\d+(\.\d+)?", str(prof.get("years_experience") or "")).group())
+    except AttributeError:
+        mine = None
+    if job.get("years") is not None and mine is not None and job["years"] > mine + 2:
+        hit("years", f"Asks for {job['years']}+ years; your profile says {prof.get('years_experience')}.")
+    if re.search(r"ph\.?d\.? (is )?required|must have a ph\.?d|doctorate (is )?required", text, re.I) \
+            and "doctor" not in str(prof.get("degree", "")).lower():
+        hit("phd", "Requires a PhD.")
+    remote = re.search(r"remote", job.get("location", ""), re.I)
+    near = re.search(r"\bny\b|new york|albany", job.get("location", ""), re.I)
+    if not remote and not near and str(prof.get("relocate", "")).lower() == "no" and ONSITE_RE.search(text + questions):
+        hit("onsite", f"On-site in {job.get('location', 'another city')} while your profile says you won't relocate.")
+    mine_vals = answer_values(job)
+    for j in active:
+        theirs = answer_values(j)
+        diff = [k for k in mine_vals if k in theirs and norm_label(mine_vals[k]) != norm_label(theirs[k])]
+        if diff:
+            hit("consistency", f"Differs from \"{j['title']}\" on {', '.join(PROFILE_LABELS.get(k, k).rstrip('?').lower() for k in diff)}.")
+            break
+    if job.get("docs"):
+        for j in active:
+            d = j.get("docs")
+            if d and days_since(job_date(j)) <= 60 and (d.get("projects") != job["docs"].get("projects") or d.get("summary") != job["docs"].get("summary")):
+                hit("resume_consistency", f"\"{j['title']}\" got a different tailored resume.")
+                break
+    if AI_POLICY_RE.search(questions) or re.search(r"do not use ai|without (the use of )?ai|no ai assistan", text, re.I):
+        hit("ai_policy", "The form has an AI-use policy.")
+    note = st["notes"].get(key)
+    if note:
+        hit("referral", f"On file for {job['company']}: {note}.")
+    for a in job.get("answers") or []:
+        k = next((k for pat, k in FACTS if re.search(pat, a["q"], re.I)), None)
+        if k in ("restrictive_agreement", "gov_employee", "gov_relative_or_official") and a["kind"] == "fact" and str(a.get("a", "")).lower() == "yes":
+            hit("conflicts", f"You answer Yes to \"{a['q'][:80]}\".")
+            break
+    out, skip = [], set(job.get("rule_overrides") or [])
+    titles = {r[0]: r[1] for r in RULES}
+    for rule, msg in found:
+        action = "ask" if rule == "cooldown_screen" else st["actions"].get(rule, "warn")
+        base = "cooldown" if rule == "cooldown_screen" else rule
+        if action == "off" or (action != "block" and base in skip):
+            continue
+        out.append({"rule": base, "action": action, "title": titles.get(base, base), "msg": msg})
+    return sorted(out, key=lambda f: RULE_ORDER[f["action"]])
+
+
+def blocked(flags):
+    return any(f["action"] == "block" for f in flags)
+
+
+def ai_restricted(job):
+    """True when the form has an AI-use policy Sai hasn't allowed for this job: then no
+    model-written answers, summary or cover letter go into it."""
+    if "ai_policy" in (job.get("rule_overrides") or []) or rule_settings()["actions"].get("ai_policy") == "off":
+        return False
+    questions = " ".join(a["q"] for a in job.get("answers") or [])
+    return bool(AI_POLICY_RE.search(questions) or re.search(r"do not use ai|without (the use of )?ai|no ai assistan",
+                                                            job.get("description") or "", re.I))
 
 
 # ---------- review and apply ----------
@@ -1675,14 +1959,15 @@ def needs_answer(a):
 def review_queue(db, cfg):
     """The review list: complete applications only (answers, and the resume and cover
     letter when those are made), best first."""
+    ctx = rules_context(db)
     jobs = [j for j in db["jobs"].values()
             if j["status"] == "new" and auto_apply_ok(j) and ready(j, cfg)
-            and (j.get("score") or 0) >= cfg["good_score"]]
+            and (j.get("score") or 0) >= cfg["good_score"] and not blocked(check_rules(j, ctx))]
     jobs.sort(key=lambda j: -(j.get("score") or 0))
     return jobs[:cfg["queue_size"]]
 
 
-def approve(job_id, answers, agreed):
+def approve(job_id, answers, agreed, allow=()):
     """Approve one application with Sai's edited answers and the consents he ticked.
     Returns the required questions still without an answer (a required consent he
     didn't tick counts); nothing is saved while any are left."""
@@ -1694,6 +1979,13 @@ def approve(job_id, answers, agreed):
         q, a = str(item.get("q", ""))[:500].strip(), str(item.get("a", ""))[:PROFILE_MAX_CHARS].strip()
         if q and a:
             overrides[q] = a
+    flags = check_rules(job, rules_context())
+    if blocked(flags):
+        raise ValueError("A hiring rule blocks this application: " + "; ".join(f["msg"] for f in flags if f["action"] == "block"))
+    allow = {str(r) for r in allow}
+    unasked = [f for f in flags if f["action"] == "ask" and f["rule"] not in allow]
+    if unasked:
+        raise ValueError("Confirm first: " + "; ".join(f["msg"] for f in unasked))
     agreed = {str(q) for q in agreed}
     consents = [a["q"] for a in job["answers"] if a["kind"] == "legal" and a["q"] in agreed]
     missing = [a["q"] for a in job["answers"]
@@ -1706,7 +1998,8 @@ def approve(job_id, answers, agreed):
         j = db["jobs"].get(job_id)
         if j:
             j.update(status="approved", status_at=stamp(), approved_at=stamp(),
-                     overrides=overrides, consents=consents)
+                     overrides=overrides, consents=consents,
+                     rule_overrides=sorted(allow & {f["rule"] for f in flags}))
             j.pop("deferred_at", None)
     update_db(change)
     return []
@@ -1715,13 +2008,17 @@ def approve(job_id, answers, agreed):
 def next_approved():
     """The approved application to submit next; ones Sai put off go last."""
     with db_lock:
-        jobs = [j for j in load_db()["jobs"].values() if j["status"] == "approved"]
+        db = load_db()
+    ctx = rules_context(db)
+    approved = [j for j in db["jobs"].values() if j["status"] == "approved"]
+    # rules are checked again: another application may have gone out since the approval
+    jobs = [j for j in approved if not blocked(check_rules(j, ctx))]
     jobs.sort(key=lambda j: (j.get("deferred_at") or "", j.get("approved_at") or ""))
     if not jobs:
-        return {"job": None, "left": 0}
+        return {"job": None, "left": 0, "held": len(approved)}
     j = jobs[0]
     return {"job": {"id": j["id"], "company": j["company"], "title": j["title"], "apply_url": apply_url(j)},
-            "left": len(jobs)}
+            "left": len(jobs), "held": len(approved) - len(jobs)}
 
 
 def defer(job_id):
@@ -1740,6 +2037,8 @@ def set_status(job_id, status):
             return False
         db["jobs"][job_id]["status"] = status
         db["jobs"][job_id]["status_at"] = stamp()
+        if status == "interview":  # a later rejection then carries the longer cooldown
+            db["jobs"][job_id]["interviewed"] = True
         return True
     return update_db(change)
 
@@ -1951,7 +2250,7 @@ def check_inbox(notify=lambda *a, **k: None):
                     new = STATUS_AFTER.get(m["kind"])
                     # a confirmation only moves a job forward from new; the others always apply
                     if new and not (new == "applied" and job["status"] != "new"):
-                        job.update(status=new, status_at=stamp())
+                        job.update(status=new, status_at=stamp(), **({"interviewed": True} if new == "interview" else {}))
             update_db(apply)
         state["messages"] = (list(reversed(fresh)) + state["messages"])[:INBOX_KEEP]
         state.update(error="", checked=stamp())

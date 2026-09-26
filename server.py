@@ -590,7 +590,7 @@ def stop(request: Request):
     return {"ok": True}
 
 
-JOB_STATUSES = ("new", "approved", "applied", "interview", "rejected", "skipped")
+JOB_STATUSES = ("new", "approved", "applied", "interview", "rejected", "withdrew", "skipped")
 
 
 class JobIn(BaseModel):
@@ -647,6 +647,7 @@ class ApproveIn(BaseModel):
     id: str
     answers: list[dict] = []
     agreed: list[str] = []
+    allow: list[str] = []  # hiring rules Sai chose to go ahead despite (Approve anyway)
 
 
 @app.post("/api/jobs/approve")
@@ -655,7 +656,7 @@ def jobs_approve(body: ApproveIn, request: Request):
     autofill script submits approved applications in his browser."""
     check_user(request)
     try:
-        missing = jobs.approve(body.id, body.answers, body.agreed[:100])
+        missing = jobs.approve(body.id, body.answers, body.agreed[:100], body.allow[:40])
     except ValueError as e:
         raise HTTPException(400, str(e))
     if missing:
@@ -757,8 +758,8 @@ def jobs_resume(request: Request, id: str = "", kind: str = "resume"):
     """A document for the autofill script to attach: the job's tailored resume or cover
     letter, or the usual resume.pdf."""
     check_user(request)
-    if kind not in ("resume", "cover"):
-        raise HTTPException(400, "kind is resume or cover")
+    if kind not in ("resume", "cover", "base"):
+        raise HTTPException(400, "kind is resume, cover or base")
     data, name = jobs.doc_file(id, kind)
     if data is None:
         raise HTTPException(404, "No such document")
@@ -811,6 +812,31 @@ def jobs_ready(request: Request):
     if jobs.progress["running"]:
         raise HTTPException(409, "A job search is already running")
     threading.Thread(target=jobs.run_get_ready, args=(panel_busy,), daemon=True).start()
+    return {"ok": True}
+
+
+@app.get("/api/jobs/rules")
+def jobs_rules(request: Request):
+    check_user(request)
+    return {"rules": [{"id": r[0], "title": r[1], "default": r[2], "help": r[3]} for r in jobs.RULES],
+            "settings": jobs.rule_settings()}
+
+
+class RulesIn(BaseModel):
+    actions: dict[str, str] = {}
+    limit: dict = {}
+    limits: dict[str, dict] = {}
+    cooldown_days: int = 180
+    notes: dict[str, str] = {}
+
+
+@app.put("/api/jobs/rules")
+def jobs_rules_save(body: RulesIn, request: Request):
+    check_user(request)
+    try:
+        jobs.save_rule_settings(body.model_dump())
+    except (TypeError, ValueError) as e:
+        raise HTTPException(400, str(e))
     return {"ok": True}
 
 
@@ -1265,6 +1291,17 @@ details[open]>summary::before{transform:rotate(45deg)}
 .consent input{width:20px;height:20px;accent-color:var(--accent);margin-top:1px;flex:none}
 .stickyfoot{position:sticky;bottom:0;margin-top:auto;padding:12px 26px calc(12px + env(safe-area-inset-bottom,0px));background:linear-gradient(to top,var(--bg) 70%,transparent);display:flex;gap:8px;align-items:center;flex-wrap:wrap}
 .stickyfoot .left{font-size:13px;color:var(--muted);flex:1;min-width:140px}
+.flag{display:flex;gap:10px;align-items:flex-start;padding:11px 13px;border-radius:12px;border:1px solid var(--line);background:var(--surface);margin-bottom:8px}
+.flag .fb{font-size:11px;font-weight:750;text-transform:uppercase;letter-spacing:.05em;padding:2px 7px;border-radius:6px;flex:none;margin-top:1px}
+.flag.block{border-color:color-mix(in srgb,var(--bad) 45%,var(--line))}.flag.block .fb{background:var(--bad-soft);color:var(--bad)}
+.flag.ask{border-color:color-mix(in srgb,var(--warn) 45%,var(--line))}.flag.ask .fb{background:var(--warn-soft);color:var(--warn)}
+.flag.warn .fb{background:var(--surface2);color:var(--muted)}
+.flag .ft{font-weight:650;font-size:14px}.flag .fm{font-size:13px;color:var(--muted)}
+.rrow{display:grid;grid-template-columns:1fr 130px;gap:12px;align-items:center;padding:12px 0;border-bottom:1px solid var(--line)}
+.rrow b{font-size:14px}.rrow .help{margin-top:2px}
+.kv{display:grid;grid-template-columns:1fr 90px 90px 36px;gap:8px;margin-bottom:8px;align-items:center}
+.kv.two{grid-template-columns:1fr 2fr 36px}
+@media (max-width: 860px){.rrow{grid-template-columns:1fr}.kv{grid-template-columns:1fr 64px 64px 36px}}
 .docs{display:grid;grid-template-columns:1fr 1fr;gap:10px}
 .doc{display:flex;gap:12px;align-items:center;padding:14px;border:1px solid var(--line);border-radius:12px;background:var(--surface);box-shadow:var(--shadow);text-decoration:none;color:var(--fg);transition:border-color .15s,transform .08s}
 .doc:hover{border-color:var(--accent)}
@@ -1447,7 +1484,7 @@ details[open]>summary::before{transform:rotate(45deg)}
     <!-- you -->
     <section id="v-you" class="view">
       <div class="vhead"><h1>You</h1><span class="spacer"></span>
-        <div class="seg" id="yousub"><button data-s="profile">Application profile</button><button data-s="memory">Memory</button></div>
+        <div class="seg" id="yousub"><button data-s="profile">Profile</button><button data-s="rules">Rules</button><button data-s="memory">Memory</button></div>
       </div>
       <div class="vbody">
         <div class="youwrap" id="y-profile">
@@ -1459,6 +1496,23 @@ details[open]>summary::before{transform:rotate(45deg)}
           </div>
           <div id="pform"></div>
           <div class="savebar"><span class="muted small" id="pdirty" style="flex:1"></span><button class="btn primary" id="psave">Save profile</button></div>
+        </div>
+        <div class="youwrap" id="y-rules" style="display:none">
+          <div class="card" style="margin-bottom:8px"><b>Hiring rules</b>
+            <div class="muted small" style="margin-top:4px">Employers reject or hold applications that break their rules: duplicates, too many at one company, reapplying too soon, graduation windows, AI-use policies. The agent checks every application against these before Review, at Approve and again right before submitting. <b>Block</b> keeps it out of Review and Apply, <b>Ask</b> makes you confirm with Approve anyway, <b>Warn</b> shows a note.</div></div>
+          <div id="rlist"></div>
+          <h3 style="font-size:16px;margin:24px 0 6px">Company caps</h3>
+          <div class="muted small" style="margin-bottom:10px">Most companies: at most this many applications in this many days. Add companies with their own caps.</div>
+          <div class="kv"><span class="small"><b>Default</b></span><input class="inp" id="rmax" type="number" min="1" aria-label="Most applications"><input class="inp" id="rdays" type="number" min="1" aria-label="Days"><span></span></div>
+          <div id="rlimits"></div>
+          <button class="btn ghost sm" id="raddlimit">Add a company</button>
+          <h3 style="font-size:16px;margin:24px 0 6px">Cooldown after a rejection</h3>
+          <div class="kv two"><span class="small">Days to wait after a rejection that followed interviews</span><input class="inp" id="rcool" type="number" min="1" aria-label="Cooldown days"><span></span></div>
+          <h3 style="font-size:16px;margin:24px 0 6px">Referrals and agencies</h3>
+          <div class="muted small" style="margin-bottom:10px">Companies where someone referred you or a recruiter submitted you. The agent won't apply there directly.</div>
+          <div id="rnotes"></div>
+          <button class="btn ghost sm" id="raddnote">Add a company</button>
+          <div class="savebar"><span class="muted small" id="rdirty" style="flex:1"></span><button class="btn primary" id="rsave">Save rules</button></div>
         </div>
         <div class="youwrap" id="y-memory" style="display:none">
           <div class="muted small" style="margin-bottom:10px">Facts the assistant knows about you, one per line. They go at the start of every chat and task, so keep them short. In a chat, "remember that ..." adds one.</div>
@@ -1849,7 +1903,7 @@ $("chatdel").onclick = async () => {
 };
 
 // ---------- jobs ----------
-const FILTERS = [["review", "Review"], ["approved", "Approved"], ["new", "New"], ["applied", "Applied"], ["interview", "Interviewing"], ["rejected", "Rejected"], ["skipped", "Skipped"], ["all", "All"]];
+const FILTERS = [["review", "Review"], ["approved", "Approved"], ["new", "New"], ["applied", "Applied"], ["interview", "Interviewing"], ["rejected", "Rejected"], ["withdrew", "Withdrew"], ["skipped", "Skipped"], ["all", "All"]];
 let S = null, jfilter = store("jfilter") || "review", jsel = null, listSig = "", applySig = "";
 function counts(s){
   const c = {review: (s.review || []).length, all: s.jobs.length};
@@ -1871,7 +1925,7 @@ function scoreRing(score, s, big){
   return r;
 }
 function statusChip(st){
-  const map = {approved: ["acc", "Approved"], applied: ["good", "Applied"], interview: ["good", "Interviewing"], rejected: ["bad", "Rejected"], skipped: ["", "Skipped"]};
+  const map = {approved: ["acc", "Approved"], applied: ["good", "Applied"], interview: ["good", "Interviewing"], rejected: ["bad", "Rejected"], withdrew: ["", "Withdrew"], skipped: ["", "Skipped"]};
   const m = map[st]; return m ? el("span", "chip " + m[0], m[1]) : null;
 }
 function listJobs(){
@@ -1911,7 +1965,7 @@ async function loadJobs(force){
   }
   updateApply(c.approved || 0);
   const list = listJobs();
-  const sig = jfilter + s.not_ready + s.progress.running + JSON.stringify(list.map(j => [j.id, j.status, j.prepared, j.docs, j.score]));
+  const sig = jfilter + s.not_ready + s.progress.running + JSON.stringify(list.map(j => [j.id, j.status, j.prepared, j.docs, j.score, (j.flags || []).map(f => f.rule + f.action)]));
   if (sig !== listSig || force) { listSig = sig; renderList(list, s); }
   if (!s.configured) $("jdetail").replaceChildren(emptyState("jobs", "Job search isn't set up", "Put config.json and resume.txt in the jobs folder on the server."));
   else if (!jsel && !document.querySelector("#jdetail .jd")) $("jdetail").replaceChildren(emptyState("jobs", list.length ? "Pick a job" : "Nothing here", list.length ? "Its answers, the posting and the actions open here." : (jfilter === "review" ? "New applications are prepared overnight." : "No jobs with this status.")));
@@ -1945,6 +1999,8 @@ function renderList(list, s){
     const sc = statusChip(j.status); if (sc && jfilter !== j.status) chips.append(sc);
     if (j.prepared && j.status === "new") chips.append(el("span", "chip acc", "Answers ready"));
     if (j.docs && j.status === "new") chips.append(el("span", "chip acc", "Resume + letter"));
+    const f0 = (j.flags || [])[0];
+    if (f0) chips.prepend(el("span", "chip " + (f0.action === "block" ? "bad" : f0.action === "ask" ? "warn" : ""), (f0.action === "block" ? "Blocked: " : f0.action === "ask" ? "Check: " : "") + f0.title));
     if (j.no_sponsorship) chips.append(el("span", "chip bad", "No sponsorship"));
     else if (j.sponsors) chips.append(el("span", "chip good", "Sponsors"));
     if (j.level) chips.append(el("span", "chip", j.level));
@@ -2023,9 +2079,9 @@ function renderDetail(j){
   const STATUS_ACTIONS = {
     new: [["skipped", "Skip", "Skipped"], ["applied", "Mark applied", "Marked applied"]],
     approved: [["new", "Back to review", "Moved back to review"], ["applied", "Mark applied", "Marked applied"]],
-    applied: [["interview", "Interviewing", "Nice! Marked interviewing"], ["rejected", "Rejected", "Marked rejected"], ["new", "Back to new", "Moved back"]],
-    interview: [["rejected", "Rejected", "Marked rejected"], ["applied", "Back to applied", "Moved back"]],
-    rejected: [["new", "Back to new", "Moved back"]], skipped: [["new", "Back to new", "Moved back"]],
+    applied: [["interview", "Interviewing", "Nice! Marked interviewing"], ["rejected", "Rejected", "Marked rejected"], ["withdrew", "Withdrew", "Marked withdrawn"], ["new", "Back to new", "Moved back"]],
+    interview: [["rejected", "Rejected", "Marked rejected"], ["withdrew", "Withdrew or declined", "Marked withdrawn"], ["applied", "Back to applied", "Moved back"]],
+    rejected: [["new", "Back to new", "Moved back"]], withdrew: [["new", "Back to new", "Moved back"]], skipped: [["new", "Back to new", "Moved back"]],
   };
   const reviewable = j.answers && j.status === "new" && j.auto_apply;
   for (const [st, label, msg] of STATUS_ACTIONS[j.status] || []) {
@@ -2033,6 +2089,17 @@ function renderDetail(j){
     const b = el("button", "btn ghost", label); b.onclick = () => setStatus2(j.id, st, msg); act.append(b);
   }
   wrap.append(act);
+  if (j.flags && j.flags.length) {
+    const sec = el("div", "sec"); sec.append(el("div", "sech", "Hiring rules"));
+    for (const f of j.flags) {
+      const c = el("div", "flag " + f.action);
+      const t = el("div"); t.append(el("div", "ft", f.title), el("div", "fm", f.msg));
+      c.append(el("span", "fb", f.action === "block" ? "Blocked" : f.action === "ask" ? "Confirm" : "Note"), t);
+      sec.append(c);
+    }
+    if (j.flags.some(f => f.action === "block")) sec.append(el("div", "muted small", "Blocked jobs stay out of Review and Apply. If a rule is wrong here, change it under You › Rules."));
+    wrap.append(sec);
+  }
   // emails
   if (j.emails && j.emails.length) {
     const sec = el("div", "sec"); sec.append(el("div", "sech", "Emails"));
@@ -2071,6 +2138,7 @@ function renderDocs(box, j){
   const hd = el("div", "sech", "Resume and cover letter");
   box.append(hd);
   const dc = j.docs;
+  if (j.ai_restricted) { const c = el("div", "chip warn", "This form has an AI-use policy. The autofill will attach your usual resume, no cover letter, and leave drafted answers for you, unless you Approve anyway."); c.style.cssText = "height:auto;padding:6px 10px;white-space:normal;margin-bottom:10px"; box.append(c); }
   if (!dc) {
     box.append(el("div", "muted small", "No tailored documents yet. Without them the autofill attaches your usual resume and no cover letter."));
     const b = el("button", "btn ghost"); b.append(icon("sparkle"), el("span", null, "Make resume and cover letter"));
@@ -2150,6 +2218,7 @@ function reviewForm(j, wrap, d){
   const need = byKind("you").sort((a, b) => (b.required ? 1 : 0) - (a.required ? 1 : 0));
   const left = el("span", "left");
   const refresh = () => {
+    if ((j.flags || []).some(f => f.action === "block")) { left.textContent = "Blocked by a hiring rule"; left.style.color = "var(--bad)"; return; }
     const miss = rows.filter(r => r.need && !r.input.value.trim()).length + consents.filter(c => c.required && !c.box.checked).length;
     left.textContent = miss ? miss + " required " + (miss === 1 ? "item" : "items") + " left" : "Ready to approve";
     left.style.color = miss ? "var(--warn)" : "var(--good)";
@@ -2222,12 +2291,15 @@ function reviewForm(j, wrap, d){
   const foot = el("div", "stickyfoot");
   const skip = el("button", "btn ghost", "Skip");
   skip.onclick = () => setStatus2(j.id, "skipped", "Skipped");
-  const ok = el("button", "btn primary"); ok.append(icon("check"), el("span", null, "Approve"));
+  const asks = (j.flags || []).filter(f => f.action === "ask"), blocks = (j.flags || []).filter(f => f.action === "block");
+  const ok = el("button", "btn primary"); ok.append(icon("check"), el("span", null, asks.length ? "Approve anyway" : "Approve"));
+  if (blocks.length) { ok.disabled = true; ok.title = blocks.map(f => f.msg).join(" "); }
   ok.onclick = async () => {
     const answers = rows.filter(r => r.input.value.trim() && r.input.value.trim() !== r.orig).map(r => ({q: r.q, a: r.input.value.trim()}));
     const agreed = consents.filter(c => c.box.checked).map(c => c.q);
+    if (asks.length && !confirm("Go ahead despite these hiring rules?\n\n" + asks.map(f => "\u2022 " + f.title + ": " + f.msg).join("\n"))) return;
     ok.disabled = true;
-    try { await send("api/jobs/approve", "POST", {id: j.id, answers, agreed}); }
+    try { await send("api/jobs/approve", "POST", {id: j.id, answers, agreed, allow: asks.map(f => f.rule)}); }
     catch (e) { ok.disabled = false; return toast(e.message, true); }
     toast("Approved. It's in Apply to approved.");
     jsel = null; $("jdetail").replaceChildren(); $("v-jobs").classList.remove("detail"); listSig = ""; applySig = ""; loadJobs(true);
@@ -2341,7 +2413,8 @@ function showYou(sub){
   for (const b of $("yousub").children) b.classList.toggle("on", b.dataset.s === sub);
   $("y-profile").style.display = sub === "profile" ? "" : "none";
   $("y-memory").style.display = sub === "memory" ? "" : "none";
-  if (sub === "profile") loadProfile(); else loadMemory();
+  $("y-rules").style.display = sub === "rules" ? "" : "none";
+  if (sub === "profile") loadProfile(); else if (sub === "rules") loadRules(); else loadMemory();
 }
 for (const b of $("yousub").children) b.onclick = () => showYou(b.dataset.s);
 let profileDirty = false;
@@ -2425,6 +2498,47 @@ $("psave").onclick = async () => {
   try { await send("api/jobs/profile", "PUT", {values, answers}); } catch (e) { return toast(e.message, true); }
   profileDirty = false; toast("Profile saved"); loadProfile();
 };
+// ---------- you: hiring rules ----------
+const ACTION_TXT = {block: "Block", ask: "Ask", warn: "Warn", off: "Off"};
+function kvRow(box, cells){
+  const row = el("div", "kv" + (cells.length === 2 ? " two" : ""));
+  const inputs = cells.map(([v, ph, type]) => { const i = el("input", "inp"); i.value = v ?? ""; i.placeholder = ph; if (type) { i.type = type; i.min = "1"; } i.oninput = () => { $("rdirty").textContent = "Unsaved changes"; }; return i; });
+  const x = el("button", "btn ghost icon sm", "×"); x.setAttribute("aria-label", "Remove"); x.onclick = () => { row.remove(); $("rdirty").textContent = "Unsaved changes"; };
+  row.append(...inputs, x); box.append(row);
+}
+async function loadRules(){
+  let d;
+  try { d = await api("api/jobs/rules"); } catch (e) { return toast(e.message, true); }
+  const st = d.settings, list = $("rlist"); list.replaceChildren();
+  for (const r of d.rules) {
+    const row = el("div", "rrow");
+    const t = el("div"); t.append(el("b", null, r.title), el("div", "help", r.help));
+    const sel = el("select", "inp"); sel.dataset.rule = r.id;
+    for (const a of ["block", "ask", "warn", "off"]) { const o = el("option", null, ACTION_TXT[a] + (a === r.default ? " (default)" : "")); o.value = a; sel.append(o); }
+    sel.value = st.actions[r.id] || r.default;
+    sel.onchange = () => { $("rdirty").textContent = "Unsaved changes"; };
+    row.append(t, sel); list.append(row);
+  }
+  $("rmax").value = st.limit.max; $("rdays").value = st.limit.days; $("rcool").value = st.cooldown_days;
+  for (const i of ["rmax", "rdays", "rcool"]) $(i).oninput = () => { $("rdirty").textContent = "Unsaved changes"; };
+  $("rlimits").replaceChildren();
+  for (const [k, v] of Object.entries(st.limits)) kvRow($("rlimits"), [[k, "Company"], [v.max, "Max", "number"], [v.days, "Days", "number"]]);
+  $("rnotes").replaceChildren();
+  for (const [k, v] of Object.entries(st.notes)) kvRow($("rnotes"), [[k, "Company"], [v, "Referred by Jane Doe / submitted by an agency"]]);
+  $("rdirty").textContent = "";
+}
+$("raddlimit").onclick = () => kvRow($("rlimits"), [["", "Company"], [3, "Max", "number"], [30, "Days", "number"]]);
+$("raddnote").onclick = () => kvRow($("rnotes"), [["", "Company"], ["", "Referred by Jane Doe / submitted by an agency"]]);
+$("rsave").onclick = async () => {
+  const actions = {}, limits = {}, notes = {};
+  for (const s of $("rlist").querySelectorAll("select")) actions[s.dataset.rule] = s.value;
+  for (const r of $("rlimits").children) { const [c, m, dd] = r.querySelectorAll("input"); if (c.value.trim()) limits[c.value.trim()] = {max: +m.value || 3, days: +dd.value || 30}; }
+  for (const r of $("rnotes").children) { const [c, n] = r.querySelectorAll("input"); if (c.value.trim() && n.value.trim()) notes[c.value.trim()] = n.value.trim(); }
+  try { await send("api/jobs/rules", "PUT", {actions, limits, notes, limit: {max: +$("rmax").value || 3, days: +$("rdays").value || 30}, cooldown_days: +$("rcool").value || 180}); }
+  catch (e) { return toast(e.message, true); }
+  toast("Rules saved"); loadRules(); listSig = "";
+};
+
 let memMax = 2000;
 function memCount(){ const n = $("memtext").value.length; $("memcount").textContent = n + " / " + memMax + " characters"; }
 async function loadMemory(){
