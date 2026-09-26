@@ -827,6 +827,7 @@ def standard_questions(profile):
 
 ASHBY_FORM_QUERY = """query ApiJobPosting($organizationHostedJobsPageName: String!, $jobPostingId: String!) {
  jobPosting(organizationHostedJobsPageName: $organizationHostedJobsPageName, jobPostingId: $jobPostingId) {
+  applicationLimitCalloutHtml
   applicationForm { sections { fieldEntries { ... on FormFieldEntry { isRequired field } } } } } }"""
 ASHBY_TYPES = {"File": "input_file", "LongText": "textarea"}
 
@@ -839,6 +840,9 @@ def ashby_questions(token, native):
                                    "jobPostingId": native}})
     posting = (data.get("data") or {}).get("jobPosting") or {}
     out = []
+    limit = html_to_text(posting.get("applicationLimitCalloutHtml") or "")
+    if limit:  # the company's own cap on applications, read by the company_cap rule
+        out.append({"label": limit, "required": False, "fields": [{"type": "notice"}], "notice": True})
     for section in (posting.get("applicationForm") or {}).get("sections") or []:
         for entry in section.get("fieldEntries") or []:
             f = entry.get("field") or {}
@@ -848,6 +852,37 @@ def ashby_questions(token, native):
             out.append({"label": f.get("title") or "", "required": bool(entry.get("isRequired")),
                         "fields": [{"type": ASHBY_TYPES.get(f.get("type"), "input_text"), "values": values}]})
     return out
+
+
+ASHBY_LIMIT_QUERY = """query ApiJobPosting($organizationHostedJobsPageName: String!, $jobPostingId: String!) {
+ jobPosting(organizationHostedJobsPageName: $organizationHostedJobsPageName, jobPostingId: $jobPostingId) {
+  applicationLimitCalloutHtml } }"""
+
+
+def ensure_limit(job):
+    """Fetch an Ashby posting's application limit notice once, for jobs prepared before
+    it was read, and add it to the job's note. Returns the job as updated."""
+    if not job["id"].startswith("ashby:") or job.get("limit_checked"):
+        return job
+    _, token, native = job["id"].split(":", 2)
+    try:
+        data = get_json("https://jobs.ashbyhq.com/api/non-user-graphql?op=ApiJobPosting",
+                        {"operationName": "ApiJobPosting", "query": ASHBY_LIMIT_QUERY,
+                         "variables": {"organizationHostedJobsPageName": urllib.parse.unquote(token),
+                                       "jobPostingId": native}})
+    except Exception:
+        return job
+    text = html_to_text(((data.get("data") or {}).get("jobPosting") or {}).get("applicationLimitCalloutHtml") or "")
+    note = job.get("note") or ""
+    if text and text not in note:
+        note = (note + " " + text).strip()
+
+    def change(db):
+        j = db["jobs"].get(job["id"])
+        if j:
+            j.update(note=note, limit_checked=stamp())
+    update_db(change)
+    return {**job, "note": note, "limit_checked": stamp()}
 
 
 def prepare(job, profile, resume, is_busy, model, max_drafts=3):
@@ -877,6 +912,9 @@ def prepare(job, profile, resume, is_busy, model, max_drafts=3):
     answers, drafted = [], 0
     for q in questions:
         label = html_to_text(q.get("label", "")).strip()
+        if q.get("notice"):
+            note = (note + " " + label).strip()
+            continue
         if re.fullmatch(r"(?i)latitude|longitude", label):
             continue  # hidden fields the form fills from the location box
         a = answer_for(label, q.get("fields") or [], profile, job["company"])
@@ -1085,6 +1123,12 @@ def queue_candidates(db, cfg):
 def get_ready(is_busy, cfg, profile, resume, deadline=None):
     """Fill in what the best review candidates are missing: answers, the tailored resume
     and the cover letter. Returns how many jobs it worked on."""
+    with db_lock:
+        candidates = queue_candidates(load_db(), cfg)
+    for j in candidates:  # Ashby's stated caps, read once per job
+        if j["id"].startswith("ashby:") and not j.get("limit_checked"):
+            ensure_limit(j)
+            time.sleep(REQUEST_PAUSE)
     with db_lock:
         todo = [j for j in queue_candidates(load_db(), cfg) if not ready(j, cfg)]
     r = load_resume() if docs_needed(cfg) else None
@@ -1706,7 +1750,8 @@ FAMILY_RES = [
     ("ml", re.compile(r"machine learning|\bml\b|\bai engineer|applied (ai|ml)|research engineer", re.I)),
     ("infrastructure", re.compile(r"devops|\bsre\b|site reliability|infrastructure|platform|cloud engineer", re.I)),
 ]
-GRAD_CONTEXT_RE = re.compile(r"new ?grad(?:uate)?\b[^.\n]{0,40}|class of [^.\n]{0,30}|graduat\w*[^.\n]{0,120}", re.I)
+GRAD_CONTEXT_RE = re.compile(r"(?:new ?grad(?:uate)?|emerging talent|early.career|university grad\w*|campus hire)\b[^.\n]{0,40}|"
+                             r"class of [^.\n]{0,30}|graduat\w*[^.\n]{0,120}", re.I)
 # a season or month before a year: "Fall 2026", "Dec 2026", "May '27" isn't matched
 TERM_RE = re.compile(r"\b(?:(spring|summer|fall|autumn|winter|jan\w*|feb\w*|mar\w*|apr\w*|may|june?|july?|aug\w*|"
                      r"sep\w*|oct\w*|nov\w*|dec\w*)\.?\s*)?(20\d\d)\b", re.I)
@@ -1801,6 +1846,23 @@ def answer_values(job):
     return out
 
 
+NUM_WORDS = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10}
+STATED_CAP_RE = re.compile(r"(?:not apply (?:to )?more than|no more than|limited to|up to|maximum of|at most)\s+(\d+|"
+                           + "|".join(NUM_WORDS) + r")\s+(?:times|applications?|roles?|positions?|jobs?|openings?)"
+                           r"[^.]{0,60}?(\d+)[\s-]*(day|week|month|year)", re.I)
+PERIOD_DAYS = {"day": 1, "week": 7, "month": 30, "year": 365}
+
+
+def stated_cap(job):
+    """A cap the company states itself, like OpenAI's "Candidates may not apply more than
+    5 times in any 180 day span" (Ashby's application limit notice), as {max, days}."""
+    m = STATED_CAP_RE.search((job.get("note") or "") + "\n" + (job.get("description") or "")[:8000])
+    if not m:
+        return None
+    n = NUM_WORDS.get(m.group(1).lower()) or int(m.group(1))
+    return {"max": n, "days": int(m.group(2)) * PERIOD_DAYS[m.group(3).lower()], "stated": True}
+
+
 def rules_context(db=None):
     if db is None:
         with db_lock:
@@ -1840,9 +1902,13 @@ def check_rules(job, ctx):
     if same:
         hit("repost", f"Looks like a repost of \"{same[0]['title']}\" ({same[0]['status']} {job_date(same[0])[:10]}).")
     lim = st["limits"].get(key) or st["limit"]
+    stated = next((c for c in map(stated_cap, [job] + others) if c), None)
+    if stated:  # the company's own rule wins
+        lim = stated
     recent = [j for j in active if days_since(job_date(j)) <= lim["days"]]
     if len(recent) >= lim["max"]:
-        hit("company_cap", f"{len(recent)} applications at {job['company']} in the last {lim['days']} days; the cap is {lim['max']}.")
+        who = f"{job['company']}'s own limit" if lim.get("stated") else "the cap"
+        hit("company_cap", f"{len(recent)} applications at {job['company']} in the last {lim['days']} days; {who} is {lim['max']}.")
     fams = {role_family(j["title"]) for j in active} | {fam}
     if len(fams) > 2:
         hit("role_spread", f"This would make {len(fams)} kinds of role at {job['company']}: {', '.join(sorted(fams))}.")
@@ -1974,6 +2040,7 @@ def approve(job_id, answers, agreed, allow=()):
     job = detail(job_id)
     if not job or not auto_apply_ok(job) or job.get("answers") is None:
         raise ValueError("This job can't be approved for automatic applying.")
+    job = ensure_limit(job)  # the company's stated cap, before the rules run
     overrides = {}
     for item in answers[:200]:
         q, a = str(item.get("q", ""))[:500].strip(), str(item.get("a", ""))[:PROFILE_MAX_CHARS].strip()

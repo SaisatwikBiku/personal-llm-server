@@ -29,7 +29,7 @@ Each rule's action can be changed under You, Rules in the panel. The settings ar
 |---|---|---|
 | Same posting twice (`already_applied`) | Block | The job is already applied, interviewing, rejected or withdrawn. |
 | Reposted opening (`repost`) | Ask | Another job at the company has the same title and location, and I approved, applied, interviewed or was rejected for it in the last 60 days. |
-| Company application cap (`company_cap`) | Block | I already have the cap's number of approved, applied or interviewing jobs at the company within its window. Default: 3 in 30 days. Google: 3 in 90 days. Other companies can get their own caps under You, Rules. |
+| Company application cap (`company_cap`) | Block | I already have the cap's number of approved, applied or interviewing jobs at the company within its window. A limit the company states itself wins: Ashby postings carry one (OpenAI: "Candidates may not apply more than 5 times in any 180 day span"), and the agent also reads phrases like "no more than three roles within a 6 month period" in postings. Otherwise: 3 in 30 days by default, Google 3 in 90 days, and any company caps set under You, Rules. |
 | Unrelated roles at one company (`role_spread`) | Ask | This job would make more than 2 kinds of role active at the company. Kinds are read from the title: database, data, ML, infrastructure, or software for everything else. |
 | Pace per company (`same_day`) | Warn | Two or more applications to the company were approved or sent today. |
 | Pace per application system (`ats_daily`) | Warn | 25 or more applications went out today on the same system (Greenhouse, Lever or Ashby). Bursts from one email can get flagged as automated. |
@@ -46,7 +46,7 @@ Each rule's action can be changed under You, Rules in the panel. The settings ar
 
 | Rule | Default | Breaks when |
 |---|---|---|
-| Graduation window (`grad_window`) | Block | The title, posting or form names graduation dates my graduation isn't in. Months count: "Fall 2026 or Spring 2027" means December 2026 to May 2027, so a May 2026 graduate is outside it. A year on its own covers the whole year. My graduation comes from the profile, or else from the resume's first degree. |
+| Graduation window (`grad_window`) | Block | The title, posting or form names graduation dates my graduation isn't in, next to words like new grad, graduating, class of, emerging talent, early career, university grad or campus hire ("Applied Emerging Talent (2027)" is for 2027 graduates). Months count: "Fall 2026 or Spring 2027" means December 2026 to May 2027, so a May 2026 graduate is outside it. A year on its own covers the whole year. My graduation comes from the profile, or else from the resume's first degree. |
 | Citizenship or clearance (`citizenship`) | Block | The posting requires U.S. citizenship, a security clearance or ITAR, or the posting or form says you must be a U.S. person (export control) and my profile says I'm not one. Most of these postings are already dropped by the search's filters; this catches the rest. |
 | No sponsorship (`no_sponsor`) | Ask | The posting says it won't sponsor visas and my profile says I'll need sponsorship. |
 | Experience well above mine (`years`) | Warn | The posting asks for more than 2 years beyond the experience in my profile. |

@@ -2577,7 +2577,7 @@ setupAlerts();
 FILL_SCRIPT = r"""// ==UserScript==
 // @name         Agent application autofill
 // @namespace    local-agent
-// @version      5
+// @version      6
 // @description  Fills job application forms from the agent panel, and submits the ones you approved there.
 // @match        https://job-boards.greenhouse.io/*
 // @match        https://boards.greenhouse.io/*
@@ -2659,6 +2659,18 @@ FILL_SCRIPT = r"""// ==UserScript==
     return questionLabel(el) || (el.id || el.name || "").replace(/[_-]+/g, " ");
   }
 
+  // Ashby puts an "Autofill from resume" upload above the form. A file there makes Ashby
+  // refill the form from the resume after we've filled it, wiping our answers, so it's
+  // skipped whenever the form has another upload for the resume itself.
+  function autofillUpload(el) {
+    if (document.querySelectorAll("input[type=file]").length < 2) return false;
+    for (let p = el.parentElement, k = 0; p && k < 5; p = p.parentElement, k++) {
+      if (p.querySelectorAll("input[type=file]").length > 1) break;  // reached the whole form
+      if (/autofill/i.test((p.innerText || "").slice(0, 300))) return true;
+    }
+    return false;
+  }
+
   function collect() {
     const fields = [], els = [], radios = new Set();
     for (const el of document.querySelectorAll("input, textarea, select")) {
@@ -2672,7 +2684,10 @@ FILL_SCRIPT = r"""// ==UserScript==
         els.push(el);
         continue;
       }
-      if (type === "file") { fields.push({label: fileLabel(el), type: "file", options: [], name: el.id || el.name || ""}); els.push(el); continue; }
+      if (type === "file") {
+        if (autofillUpload(el)) continue;  // the form's own resume parser, not the resume field
+        fields.push({label: fileLabel(el), type: "file", options: [], name: el.id || el.name || ""}); els.push(el); continue;
+      }
       if (el.getAttribute("aria-hidden") === "true" || el.tabIndex < 0) continue;  // validation helpers
       if (type === "radio") {
         if (!el.name || radios.has(el.name)) continue;
@@ -2894,7 +2909,14 @@ FILL_SCRIPT = r"""// ==UserScript==
     pill = node("button", "Agent", SHADOW + BTN + "position:fixed;right:12px;bottom:12px;background:#57a37a;color:#fff;border-radius:22px;padding:10px 14px;display:none");
     pill.setAttribute("aria-label", "Show the autofill panel");
     pill.onclick = () => minimize(false);
-    document.body.append(box, pill);
+    // in a shadow root, so the page's styles can't squash or restyle the panel
+    const host = document.createElement("div");
+    host.style.cssText = "all:initial";
+    const root = host.attachShadow({mode: "open"});
+    const reset = document.createElement("style");
+    reset.textContent = "*{box-sizing:border-box;line-height:1.4;letter-spacing:normal;text-transform:none;text-align:left}div{display:block;position:static;height:auto;width:auto;white-space:normal;word-break:break-word}button{text-align:center}";
+    root.append(reset, box, pill);
+    document.body.append(host);
     let saved = "0";
     try { saved = localStorage.getItem("agent-fill-min") || "0"; } catch (e) {}
     minimize(saved === "1");
